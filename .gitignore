@@ -1,0 +1,16 @@
+.pio
+.vscode/.browse.c_cpp.db*
+.vscode/browse.vc.db*
+.vscode/*.db
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+.venv/
+
+# WiFi 크레덴셜 — 절대 커밋하지 말 것!
+secrets.ini
+platformio.ini
+sdkconfig.esp32dev
+compile_commands.json
+
+guide.md
