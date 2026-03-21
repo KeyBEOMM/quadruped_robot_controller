@@ -25,12 +25,12 @@ private:
     IK& ik_solver_;
 
     // --- 런타임 상태 버퍼 (Latch용) ---
-    LegPhase prev_phase_[4];
-    Eigen::Vector3f swing_start_pos_[4];
-    Eigen::Vector3f swing_end_pos_[4];
-    Eigen::Vector3f stance_start_pos_[4];
-    float latched_step_height_[4];
-    Eigen::Vector3f last_valid_angles_[4];
+    LegPhase prev_phase_[4]; // 이전 스텝의 위상(phase: STANCE, SWING), s(0~1)
+    Eigen::Vector3f swing_start_pos_[4]; // 스윙 시작점(글로벌 좌표) 
+    Eigen::Vector3f swing_end_pos_[4]; // 스윙 종료점(글로벌 좌표)
+    Eigen::Vector3f stance_start_pos_[4]; // 스탠스 시작점(글로벌 좌표)
+    float latched_step_height_[4]; // 스텝 높이
+    Eigen::Vector3f last_valid_angles_[4]; // 마지막 유효한 각도
 
 public:
     // 현재 프레임에서 도출된 4다리의 글로벌(지면) 기준 발 좌표
@@ -50,8 +50,8 @@ public:
         body_kinematics_(kin),
         ik_solver_(ik)
     {
-        // 최기 상태 세팅
-        for (int i = 0; i < 4; ++i) {
+        // 초기 상태 세팅
+        for (int i = 0; i < 4; ++i) { // 이전싱태가 다른 특정 자세로 있는경우 그냥 0으로 초기화해도 괜찮은가?
             prev_phase_[i] = LegPhase::STANCE;
             swing_start_pos_[i].setZero();
             swing_end_pos_[i].setZero();
@@ -64,11 +64,11 @@ public:
 
     // TROT 상태에서 호출되는 보행 처리기
     // 반환값: 4개 다리(LF, RF, LH, RH) 각각의 [HAA, HFE, KFE] 모터 목표 각도 블록
-    std::array<Eigen::Vector3f, 4> processTrot(float dt, const RobotCommand& cmd) {
+    std::array<Eigen::Vector3f, 4> processTrot(float dt, const RobotCommand& cmd) { // comment:런타임간의 할당 피해야하는것으로 아는데 괜찮은건가?
         std::array<Eigen::Vector3f, 4> target_angles;
 
         // 1. 위상 및 시간 업데이트
-        gait_sequencer_.update(dt, cmd);
+        gait_sequencer_.update(dt, cmd); // dt = 0.02
         const auto& leg_states = gait_sequencer_.getLegStates();
         float t_cycle = gait_sequencer_.getCycleTime();
         float t_stance = t_cycle * params_.DUTY_FACTOR;
@@ -79,20 +79,22 @@ public:
             float s = leg_states[i].s;
 
             // --- Rising Edge: STANCE -> SWING ---
-            // 코멘트 주신 대로: 스윙 궤적의 목표 위치와 높이는 여기서 단 1번 계산 후(Latching),
-            // 스윙이 끝날 때까지 바뀌지 않습니다. (cmd가 중간에 변해도 무관함)
             if (prev_phase_[i] == LegPhase::STANCE && current_phase == LegPhase::SWING) {
                 swing_start_pos_[i] = foot_pos_global_[i];
                 
                 // 2D 어깨 오프셋
                 Eigen::Vector2f shoulder_2d(params_.shoulder_offsets[i].x(), params_.shoulder_offsets[i].y());
                 
-                // 목표 착지점 (Local, Base Frame) -> Global 관점이긴 하나 회전을 무시한 로컬 평면
-                // 하지만 FootPlanner의 calculateTargetFootPosition는 shoulder_offset 기준으로 계산됩니다.
+                // 목표 착지점 계산 (FootPlanner)
                 Eigen::Vector3f target_offset = foot_planner_.calculateTargetFootPosition(cmd, t_cycle, shoulder_2d);
                 
-                // Home Stance(어깨 바로 아래 글로벌 좌표) 
-                Eigen::Vector3f home_pos(params_.shoulder_offsets[i].x(), params_.shoulder_offsets[i].y(), 0.0f);
+                // Home Stance (어깨 HAA를 거쳐 HFE 조인트 바로 아래에 위치하도록 Y 오프셋 보정)
+                float leg_side = (i == 0 || i == 2) ? 1.0f : -1.0f;
+                Eigen::Vector3f home_pos(
+                    params_.shoulder_offsets[i].x(), 
+                    params_.shoulder_offsets[i].y() + leg_side * params_.HAA_OFFSET_Y, 
+                    0.0f
+                );
                 
                 // 최종 스윙 목표 지점: 기본 착지점 + 스텝 이동량
                 swing_end_pos_[i] = home_pos + target_offset;
@@ -131,6 +133,7 @@ public:
 
             // 상태 업데이트
             prev_phase_[i] = current_phase;
+            // 현재까지 foot_pos_global_에 현재 state의 s에 해당하는 궤적이 저장되어있음
         }
 
         // 3. 글로벌 -> 발 로컬 (BodyKinematics) 변환
@@ -143,7 +146,7 @@ public:
             float leg_side = (i == 0 || i == 2) ? 1.0f : -1.0f;
             
             // knee_dir: 현재 무릎 굽힘 방향 고정 가정 (기구 모델에 따라 1.0f로 세팅)
-            float knee_dir = 1.0f; 
+            float knee_dir = -1.0f; 
 
             Eigen::Vector3f angles;
             bool ok = ik_solver_.IKsolver(foot_pos_local[i], leg_side, knee_dir, angles);
@@ -164,7 +167,12 @@ public:
     // IDLE 상태 등에서 4개 다리를 초기 위치(Home Stance)로 리셋함.
     void initHomeStance() {
         for (int i = 0; i < 4; ++i) {
-            Eigen::Vector3f home(params_.shoulder_offsets[i].x(), params_.shoulder_offsets[i].y(), 0.0f);
+            float leg_side = (i == 0 || i == 2) ? 1.0f : -1.0f;
+            Eigen::Vector3f home(
+                params_.shoulder_offsets[i].x(), 
+                params_.shoulder_offsets[i].y() + leg_side * params_.HAA_OFFSET_Y, 
+                0.0f
+            );
             foot_pos_global_[i] = home;
             prev_phase_[i] = LegPhase::STANCE;
             stance_start_pos_[i] = home;

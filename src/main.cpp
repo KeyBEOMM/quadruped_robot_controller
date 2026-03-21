@@ -57,6 +57,32 @@ void ControlTask(void* pvParameters) {
 
     LocomotionController loco_ctrl_(PARAMS_, gait_sequencer_, foot_planner_, traj_gen_, body_kinematics_, ik_solver_);
 
+    // -------------------------------------------------------
+    // StateMachine 전이 콜백 등록
+    // 캡처 람다로 loco_ctrl_을 참조 → 전이 시점에 1회만 실행
+    // [주의] loco_ctrl_은 ControlTask 스택에 있으므로,
+    //        이 콜백은 반드시 Core 1 (ControlTask) 에서만 호출되어야 한다.
+    //        Core 0 (CommTask)의 onResetCommand()는 INIT 콜백만 트리거하므로
+    //        현재 구조에서 cross-core 접근 위험은 없다.
+    // -------------------------------------------------------
+    // IDLE 진입 시: foot_pos_global_ 및 stance_start_pos_를 Home Stance로 초기화
+    // (INIT->IDLE, TRANSITION->IDLE 양쪽에서 모두 호출됨)
+    g_sm.on_enter_idle_ = [&loco_ctrl_]() {
+        loco_ctrl_.initHomeStance();
+        ESP_LOGI("SM_CB", "on_enter_idle_: Home Stance initialized");
+    };
+
+    // TROT 진입 시: foot_pos_global_ 및 stance_start_pos_를 Home Stance로 초기화
+    // rising Edge Latch의 swing_start_pos_가 Home 좌표를 기준으로 시작되도록 보장.
+    // gait_sequencer_.reset()으로 current_time_=0 초기화:
+    //   이전 보행에서 누적된 시간이 남아 s가 중간값(예: 0.6)에서
+    //   시작되는 것을 방지하고, 항상 s=0부터 깨끗하게 보행 시작.
+    g_sm.on_enter_trot_ = [&loco_ctrl_, &gait_sequencer_]() {
+        gait_sequencer_.reset();        // s=0부터 시작 보장 (위상 리셋)
+        loco_ctrl_.initHomeStance();    // 발 좌표 Home으로 초기화
+        ESP_LOGI("SM_CB", "on_enter_trot_: GaitSequencer reset + Home Stance initialized");
+    };
+
     // vTaskDelayUntil을 위한 기준 시각 초기화
     // vTaskDelayUntil은 "마지막 깨어난 시각 + 주기"를 절대 시각으로 지정하여
     // 루프 처리 시간이 길어져도 누적 드리프트가 발생하지 않는다.
@@ -100,11 +126,10 @@ void ControlTask(void* pvParameters) {
 
         // -------------------------------------------------------
         // Step 2. Watchdog — 통신 두절 감시
-        // 마지막 수신 타임스탬프와 현재 시각의 차이가
-        // WATCHDOG_TIMEOUT_MS(100ms)를 초과하면 ERROR로 강제 전이한다.
         // -------------------------------------------------------
         uint32_t now_ms = (uint32_t)(current_time / 1000ULL);
-        uint32_t age_ms = now_ms - snapshot.timestamp_ms;
+        // CommTask가 방금 기록한 timestamp가 now_ms보다 미래일 수 있으므로(언더플로우 방지)
+        uint32_t age_ms = (now_ms > snapshot.timestamp_ms) ? (now_ms - snapshot.timestamp_ms) : 0;
 
         if (snapshot.timestamp_ms > 0 && age_ms > WATCHDOG_TIMEOUT_MS) {
             if (g_sm.getState() != RobotState::ERROR) {
@@ -133,23 +158,77 @@ void ControlTask(void* pvParameters) {
         // -------------------------------------------------------
         switch (g_sm.getState()) {
             case RobotState::INIT:
-                // 보간 생성기 호출 → 엎드린 자세에서 IDLE 자세로 Soft-Start
+                // [TBD: Phase 6] 보간 생성기 호출 → 엎드린 자세에서 IDLE 자세로 Soft-Start
+                // 현재는 테스트를 위해 즉시 IDLE로 강제 전이합니다.
+                g_sm.onInitComplete();
                 break;
             case RobotState::IDLE:
-                // Home Stance 유지
-                loco_ctrl_.initHomeStance();
+            {
+                // Home Stance 유지는 on_enter_idle_ 콜백에서 전이 시 1회 수행
+                // (매 프레임 호출 불필요)
+
+                // 속도 명령 감시: 임계(0.01) 초과 시 TROT으로 전이
+                // onVelocityCommand() 내부에서 on_enter_trot_ 콜백이 호출된다.
+                bool has_velocity = (fabsf(snapshot.cmd.vx) > 0.01f ||
+                                     fabsf(snapshot.cmd.vy) > 0.01f ||
+                                     fabsf(snapshot.cmd.wz) > 0.01f);
+
+                if (has_velocity) {
+                    ESP_LOGI(TAG, "[StateMachine] IDLE -> TROT (vx=%.2f vy=%.2f wz=%.2f)",
+                             snapshot.cmd.vx, snapshot.cmd.vy, snapshot.cmd.wz);
+                    g_sm.onVelocityCommand(); // → on_enter_trot_ 콜백 자동 호출
+                }
                 break;
+            }
             case RobotState::TROT:
             {
+                // -------------------------------------------------------
                 // 보행 파이프라인 연산 (Phase 4)
+                // -------------------------------------------------------
                 auto target_angles = loco_ctrl_.processTrot(dt, snapshot.cmd);
-                
-                // 임시: 매 초마다 첫 번째 다리의 연산된 첫 번째 관절(HAA) 로그 출력 (수치 검증용)
+
+                // [Phase 4 검증] 1초마다: IK 각도 스냅샷 + 범위 검사 + T_cycle 출력
+                // 루프 지연(Deadline Miss) 방지를 위해 로그는 1초에 한 번만 출력합니다.
                 static uint64_t last_ik_log = 0;
                 if (current_time - last_ik_log > 1000000ULL) {
-                    ESP_LOGI(TAG, "IK Out (LF): %.2f, %.2f, %.2f rad", 
-                             target_angles[0].x(), target_angles[0].y(), target_angles[0].z());
+                    // 1. IK 범위 결함이 있는지 검사 (Phase 5 이전이므로 음수 각도 정상)
+                    // (완전한 물리 이탈(예: -90~90도 초과) 여부만 가볍게 출력)
+                    const float RAD_MIN = 0.0; 
+                    const float RAD_MAX =  M_PI;      
+                    for (int i = 0; i < 4; ++i) {
+                        for (int j = 0; j < 3; ++j) {
+                            float a = target_angles[i](j);
+                            if (a < RAD_MIN || a > RAD_MAX) {
+                                ESP_LOGW(TAG, "[Phase4/test1] Leg%d joint%d OUT_OF_RANGE %.1f deg",
+                                         i, j, a * (180.0f / M_PI));
+                            }
+                        }
+                    }
+
+                    // 2. T_cycle 판정
+                    float t_cycle = gait_sequencer_.getCycleTime();
+                    ESP_LOGI(TAG, "[Phase4] cmd(vx=%.2f vy=%.2f wz=%.2f) T_cycle=%.3fs",
+                             snapshot.cmd.vx, snapshot.cmd.vy, snapshot.cmd.wz,
+                             t_cycle); 
+                             
+                    // 3. IK 각도 출력
+                    ESP_LOGI(TAG, "IK[LF]: %.2f %.2f %.2f | IK[RF]: %.2f %.2f %.2f",
+                             target_angles[0].x(), target_angles[0].y(), target_angles[0].z(),
+                             target_angles[1].x(), target_angles[1].y(), target_angles[1].z());
+                    ESP_LOGI(TAG, "IK[LH]: %.2f %.2f %.2f | IK[RH]: %.2f %.2f %.2f",
+                             target_angles[2].x(), target_angles[2].y(), target_angles[2].z(),
+                             target_angles[3].x(), target_angles[3].y(), target_angles[3].z());
+                             
                     last_ik_log = current_time;
+                }
+
+                // 속도=0 감시: 정지 명령 수신 시 TRANSITION으로 전이
+                bool is_stopped = (fabsf(snapshot.cmd.vx) <= 0.01f &&
+                                   fabsf(snapshot.cmd.vy) <= 0.01f &&
+                                   fabsf(snapshot.cmd.wz) <= 0.01f);
+                if (is_stopped) {
+                    ESP_LOGI(TAG, "[StateMachine] TROT -> TRANSITION (velocity zero)");
+                    g_sm.onStopCommand();
                 }
                 break;
             }
@@ -213,7 +292,7 @@ extern "C" void app_main(void) {
 
     ESP_LOGI(TAG, "All tasks created. Scheduler running.");
 }
-
+    
 
 // ============================================================
 // [Phase 1] StateMachine 전이 테스트

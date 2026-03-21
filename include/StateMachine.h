@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include "esp_log.h"
 #include "quadruped_types.h"
 
@@ -22,9 +23,10 @@ static const char* TAG_SM = "StateMachine";
 class StateMachine {
 public:
     // ------------------------------------------------------------
-    // 콜백 함수 포인터 타입 정의
+    // 콜백 함수 타입 정의
+    // std::function을 사용하여 캡처 있는 람다도 등록 가능
     // ------------------------------------------------------------
-    using StateCallback = void (*)();
+    using StateCallback = std::function<void()>;
 
     // 각 상태 진입 시 호출할 콜백 (nullptr 가능 = 콜백 없음)
     StateCallback on_enter_init_       = nullptr;

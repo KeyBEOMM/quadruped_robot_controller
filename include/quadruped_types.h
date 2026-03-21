@@ -115,5 +115,5 @@ struct SharedData
 // ============================================================
 constexpr uint32_t CONTROL_DT_MS = 20;          // 제어 루프 목표 주기 (ms) → 50Hz
 constexpr float    CONTROL_DT_S  = 0.020f;      // 제어 루프 주기 (초)
-constexpr uint32_t WATCHDOG_TIMEOUT_MS = 100;    // 통신 두절 판정 임계 시간 (ms)
+constexpr uint32_t WATCHDOG_TIMEOUT_MS = 500;    // 통신 두절 판정 임계 시간 (ms) - WiFi 환경 고려 완화
 constexpr float    INIT_DURATION_S = 3.0f;       // Soft-Start 기립 보간 시간 (초)

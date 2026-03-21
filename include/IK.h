@@ -88,7 +88,8 @@ public:
         float theta1 = gamma - (knee_dir * delta);
 
         float beta = std::acos(cos_beta);    
-        float theta2 = knee_dir * beta - (float)M_PI; // 지금으로써는 lefty로 고정(knee_dir=1.0f)
+        // knee_dir이 -1.0일 때 -255도처럼 수학적 클램핑 범위를 이탈하지 않도록 괄호로 묶어 부호 전체를 반전시킵니다.
+        float theta2 = knee_dir * (beta - (float)M_PI);
         
         // (선택 사항) 물리적 모터 방향까지 여기서 적용하고 싶다면 cwiseProduct 사용
         // out_angles = Eigen::Vector3f(theta0, theta1, theta2).cwiseProduct(motor_dir_signs_[...]);

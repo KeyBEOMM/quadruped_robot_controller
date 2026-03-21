@@ -24,7 +24,7 @@ public:
         :   params_(params),
             T_cycle_(params_.max_cycle_time),
             // TUNNING_PARAM(params_.default_cycle_time / params_.default_stride),
-            current_time_(0.0f) 
+            current_time_(0.0f)
     {
      
         // 초기 다리 상태 세팅 (모두 지면에 닿아있는 상태로 시작)
@@ -65,7 +65,8 @@ public:
     }
 
     void updatePhase(float dt) {
-        current_time_ += dt;
+        current_time_ += dt; // 여기서 0.02를 더하는게 맞나? 아직 제어주기가 돌기 전엔데 선반영 아닌가? 이정도는 편의성을 위해 어쩔 수없는 trade-off인가?
+                            // 추가로 보행 종료 후 다시 보행 시작할 때, 이전에 쌓인 current_time_이 그대로 유지되어 시작 위상이 달라지지 않는가?(main에서 locomation class는 처음에 초기화 되므로..)
         const float df = params_.DUTY_FACTOR; // Stance 비율 (Trot 기본값: 0.5)
         for (int i = 0; i < 4; ++i) {
             float phase = std::fmod((current_time_/T_cycle_) + phase_OFFSET_[i], 1.0f); // 0.0 ~ 1.0 사이의 위상 계산
@@ -74,6 +75,12 @@ public:
             leg_states_[i].s = (phase < df) ? (phase / df) : ((phase - df) / (1.0f - df)); // 각 위상 내 0.0~1.0 정규화
         }                                               
     }
+
+    // TROT 재진입 시 호출: current_time_을 0으로 초기화하여
+    // 이전 보행에서 누적된 시간이 남아 s가 중간값(예: 0.6)에서
+    // 시작되는 문제를 방지한다. 항상 s=0부터 깨끗하게 시작 보장.
+    void reset() { current_time_ = 0.0f; }
+
     const std::array<LegState, 4>& getLegStates() const { return leg_states_; }
 
     void update(float dt, const RobotCommand& cmd) {
