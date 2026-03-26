@@ -32,6 +32,17 @@ private:
     float latched_step_height_[4]; // 스텝 높이
     Eigen::Vector3f last_valid_angles_[4]; // 마지막 유효한 각도
 
+    // [A-2] Home Stance 위치 헬퍼 (DRY 해소)
+    // processTrot와 initHomeStance 양쉽에서 동일한 계산식이 중복되지 않도록 단일지점으로 추출
+    Eigen::Vector3f getHomePos(int i) const {
+        const float leg_side = (i == 0 || i == 2) ? 1.0f : -1.0f;
+        return Eigen::Vector3f(
+            params_.shoulder_offsets[i].x(),
+            params_.shoulder_offsets[i].y() + leg_side * params_.HAA_OFFSET_Y,
+            0.0f
+        );
+    }
+
 public:
     // 현재 프레임에서 도출된 4다리의 글로벌(지면) 기준 발 좌표
     std::array<Eigen::Vector3f, 4> foot_pos_global_;
@@ -88,16 +99,8 @@ public:
                 // 목표 착지점 계산 (FootPlanner)
                 Eigen::Vector3f target_offset = foot_planner_.calculateTargetFootPosition(cmd, t_cycle, shoulder_2d);
                 
-                // Home Stance (어깨 HAA를 거쳐 HFE 조인트 바로 아래에 위치하도록 Y 오프셋 보정)
-                float leg_side = (i == 0 || i == 2) ? 1.0f : -1.0f;
-                Eigen::Vector3f home_pos(
-                    params_.shoulder_offsets[i].x(), 
-                    params_.shoulder_offsets[i].y() + leg_side * params_.HAA_OFFSET_Y, 
-                    0.0f
-                );
-                
-                // 최종 스윙 목표 지점: 기본 착지점 + 스텝 이동량
-                swing_end_pos_[i] = home_pos + target_offset;
+                // [A-2] getHomePos() 헬퍼 사용 (home_pos 중복 상수 제거)
+                swing_end_pos_[i] = getHomePos(i) + target_offset;
                 
                 // 스텝 높이 Latch
                 latched_step_height_[i] = traj_gen_.calculateStepHeight(swing_start_pos_[i], swing_end_pos_[i]);
@@ -142,14 +145,11 @@ public:
 
         // 4. IK 연산 수행 (Hold 버퍼 포함)
         for (int i = 0; i < 4; ++i) {
-            // leg_side: 왼쪽 다리(LF=0, LH=2)는 1.0f, 오른쪽 다리(RF=1, RH=3)는 -1.0f
-            float leg_side = (i == 0 || i == 2) ? 1.0f : -1.0f;
-            
-            // knee_dir: 현재 무릎 굽힘 방향 고정 가정 (기구 모델에 따라 1.0f로 세팅)
+            // knee_dir: 현재 무릎 굽힘 방향 고정 가정 (기구 모델에 따라 -1.0f로 세팅)
             float knee_dir = -1.0f; 
 
             Eigen::Vector3f angles;
-            bool ok = ik_solver_.IKsolver(foot_pos_local[i], leg_side, knee_dir, angles);
+            bool ok = ik_solver_.IKsolver(foot_pos_local[i], i, knee_dir, angles);
 
             if (!ok) {
                 // IK 실패 (특이점/도달 불가) -> 직전 정상 관절 각도로 Hold
@@ -167,12 +167,8 @@ public:
     // IDLE 상태 등에서 4개 다리를 초기 위치(Home Stance)로 리셋함.
     void initHomeStance() {
         for (int i = 0; i < 4; ++i) {
-            float leg_side = (i == 0 || i == 2) ? 1.0f : -1.0f;
-            Eigen::Vector3f home(
-                params_.shoulder_offsets[i].x(), 
-                params_.shoulder_offsets[i].y() + leg_side * params_.HAA_OFFSET_Y, 
-                0.0f
-            );
+            // [A-2] getHomePos() 헬퍼 사용 (DRY 해소)
+            const Eigen::Vector3f home = getHomePos(i);
             foot_pos_global_[i] = home;
             prev_phase_[i] = LegPhase::STANCE;
             stance_start_pos_[i] = home;

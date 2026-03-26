@@ -13,4 +13,7 @@ platformio.ini
 sdkconfig.esp32dev
 compile_commands.json
 
-guide.md
+.AGENTS/
+GEMINI.md
+
+log/

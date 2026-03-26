@@ -15,7 +15,7 @@ private:
     std::array<LegState, 4> leg_states_; // 4개의 다리 상태
     
     float T_cycle_; // 현재 사이클 타임
-    const float phase_OFFSET_[4] = {0.0f, 0.5f, 0.0f, 0.5f}; // trot gait의 위상 오프셋 (LF, RF, LH, RH)
+    const float phase_offsets_[4] = {0.0f, 0.5f, 0.0f, 0.5f}; // trot gait의 위상 오프셋 (LF, RF, LH, RH)
     // float TUNNING_PARAM; // 튜닝 파라미터 cycle == 2s 일때, speed == 0.19 m/s가 되도록 설정 (실험적으로 조절 필요)
     float current_time_; // 현재 시간 (s)
 
@@ -65,11 +65,13 @@ public:
     }
 
     void updatePhase(float dt) {
-        current_time_ += dt; // 여기서 0.02를 더하는게 맞나? 아직 제어주기가 돌기 전엔데 선반영 아닌가? 이정도는 편의성을 위해 어쩔 수없는 trade-off인가?
-                            // 추가로 보행 종료 후 다시 보행 시작할 때, 이전에 쌓인 current_time_이 그대로 유지되어 시작 위상이 달라지지 않는가?(main에서 locomation class는 처음에 초기화 되므로..)
+        current_time_ += dt;
+        // [Float Overflow Guard] float32는 ~8300초(약 2.3시간) 이후 0.02f 증분이 소실됨.
+        // T_cycle_ 단위로 wrap하여 정밀도를 유지한다.
+        current_time_ = std::fmod(current_time_, T_cycle_);
         const float df = params_.DUTY_FACTOR; // Stance 비율 (Trot 기본값: 0.5)
         for (int i = 0; i < 4; ++i) {
-            float phase = std::fmod((current_time_/T_cycle_) + phase_OFFSET_[i], 1.0f); // 0.0 ~ 1.0 사이의 위상 계산
+            float phase = std::fmod((current_time_/T_cycle_) + phase_offsets_[i], 1.0f); // 0.0 ~ 1.0 사이의 위상 계산
             
             leg_states_[i].phase = (phase < df) ? LegPhase::STANCE : LegPhase::SWING;
             leg_states_[i].s = (phase < df) ? (phase / df) : ((phase - df) / (1.0f - df)); // 각 위상 내 0.0~1.0 정규화

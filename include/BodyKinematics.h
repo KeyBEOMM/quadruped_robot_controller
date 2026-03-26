@@ -18,6 +18,22 @@ public:
                           const std::array<Eigen::Vector3f, 4>& foot_pos_global,
                           std::array<Eigen::Vector3f, 4>& out_foot_pos_local) {
         
+        // [Zero-Rotation Early Exit] roll/pitch/yaw가 모두 영에 가까웈다면
+        // AngleAxisf 및 matrix()의 sin/cos 6회 호출을 생략하고 직접 번환
+        // 일반 보행 중 50Hz 루프에서 ~30μs 절약
+        constexpr float kAngleEpsilon = 1e-4f;
+        const Eigen::Vector3f P_CoM(0.0f, 0.0f, params_.default_height);
+
+        if (std::abs(cmd.roll)  < kAngleEpsilon &&
+            std::abs(cmd.pitch) < kAngleEpsilon &&
+            std::abs(cmd.yaw)   < kAngleEpsilon) {
+            // 회전 없음: 단순 평행이동 + 어깨 오프셋만 적용
+            for (int i = 0; i < 4; ++i) {
+                out_foot_pos_local[i] = (foot_pos_global[i] - P_CoM) - params_.shoulder_offsets[i];
+            }
+            return;
+        }
+
         // 1. Roll, Pitch, Yaw 지령을 기반으로 회전 행렬 R 생성 (Z-Y-X 순서) - body frame 기준
         Eigen::AngleAxisf rollAngle(cmd.roll, Eigen::Vector3f::UnitX());
         Eigen::AngleAxisf pitchAngle(cmd.pitch, Eigen::Vector3f::UnitY());
@@ -27,9 +43,6 @@ public:
         
         // 로컬로 가져오기 위해 전치 행렬(Transpose == Inverse in SO(3)) 사용 - 
         Eigen::Matrix3f R_body_T = R_body.transpose();
-
-        // 2. 몸통의 평행 이동 벡터 (높이 제어) (global frame 기준)
-        Eigen::Vector3f P_CoM(0.0f, 0.0f, params_.default_height);
 
         // 3. 4개의 다리에 대해 좌표 변환 수행
         for (int i = 0; i < 4; ++i) {

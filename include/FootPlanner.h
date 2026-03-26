@@ -13,30 +13,9 @@ private:
 public:
     FootPosPlanner(const RobotParams& params) : params_(params) {}
 
-    void calculateTargetFootPositions(const RobotCommand& cmd, float t_cycle, 
-                                      Eigen::Vector3f& out_targets
-                                      ) {
-        float t_stance = t_cycle * params_.DUTY_FACTOR;
-
-        // Raibert Heuristic
-        float step_x = (cmd.vx * t_stance) / 2.0f;
-        float step_y = (cmd.vy * t_stance) / 2.0f;
-
-        // 3. 벡터 크기 기반의 안전 Clamping (Heading 왜곡 방지)        
-        float current_stride = std::sqrt(step_x * step_x + step_y * step_y);
-
-        if (current_stride > params_.default_stride) {
-            // 뻗으려던 방향(각도)은 그대로 유지한 채, 크기만 MAX_STRIDE로 축소(스케일링)
-            float scale = params_.default_stride / current_stride;
-            step_x *= scale;
-            step_y *= scale;
-        }
-
-        out_targets[0] = step_x;
-        out_targets[1] = step_y;
-        out_targets[2] = 0.0f;
-    }
-    
+    // [핵심] 각 다리의 합성 속도(Kinematic Velocity) V = v + (w x r)을 기반으로
+    // Raibert Heuristic을 적용하여 스윙 목표 착지 오프셋을 계산합니다.
+    // shoulder_offset: 2D 어깨 위치 (각 다리별 회전 반경 계산에 사용)
     Eigen::Vector3f calculateTargetFootPosition(const RobotCommand& cmd, float t_cycle, Eigen::Vector2f& shoulder_offset) {
         
         float t_stance = t_cycle * params_.DUTY_FACTOR;

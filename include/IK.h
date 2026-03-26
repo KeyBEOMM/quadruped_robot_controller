@@ -8,13 +8,16 @@ class IK {
 private:
     RobotParams params_;
 
-    const float leg_side_signs_[4] = {1.0f, -1.0f, 1.0f, -1.0f}; //LF, RF, LH, RH
     const Eigen::Vector3f motor_dir_signs_[4] = {
         { 1.0f,  1.0f,  1.0f},  // LF
-        {-1.0f, -1.0f, -1.0f},  // RF (모터가 뒤집혀 장착되었다고 가정)
+        {-1.0f, -1.0f, -1.0f},  // RF (모터가 뒤집혀 장착됨)
         { 1.0f,  1.0f,  1.0f},  // LH
         {-1.0f, -1.0f, -1.0f}   // RH
     };
+    // leg_side는 leg_index로부터 결정론적으로 도출: 좌측(0,2)=+1.0, 우측(1,3)=-1.0
+    static constexpr float deriveLegSide(int leg_index) {
+        return (leg_index % 2 == 0) ? 1.0f : -1.0f;
+    }
     float L_1;      // 허벅지 길이
     float L_2;      // 종아리 길이
     float HAA_Y;    // HAA 오프셋
@@ -30,37 +33,36 @@ private:
 
 public:
     // 파라미터 설명:
-    // p_local: 어깨 기준 목표 좌표 (x, y, z)
-    // leg_side: 왼쪽 다리(1.0), 오른쪽 다리(-1.0) -> HAA 오프셋 부호 결정
-    // knee_dir: 무릎 굽힘 방향. '<' 모양이면 1.0, '>' 모양이면 -1.0 (다리 조립 상태에 따라 고정)
-    // out_angles: 계산된 3개의 모터 각도를 담을 참조 변수
-    // 반환값: 계산 성공 시 true, 도달 불가/특이점 시 false
+    // p_local:    어깨 기준 목표 좌표 (x, y, z)
+    // leg_index:  다리 인덱스 (0=LF, 1=RF, 2=LH, 3=RH)
+    //             → motor_dir_signs_ 선택 및 leg_side 자동 도출에 사용
+    // knee_dir:   무릅 굽힘 방향. '<' 모양이면 1.0, '>' 모양이면 -1.0 (다리 조립 상태에 따라 고정)
+    // out_angles: 계산된 3개의 모터 각도 (물리 모터 방향 부호 적용 완료)
+    // 반환값:     계산 성공 시 true, 도달 불가/특이점 시 false
     IK(const RobotParams& params) : params_(params) {
-        
-        L_1 = params_.HFE_OFFSET; // 허벅지 길이
-        L_2 = params_.KNE_OFFSET + params_.FOOT_OFFSET;   // 종아리 길이
-        HAA_Y = params_.HAA_OFFSET_Y; // HAA 오프셋
-        HAA_Z = params_.HAA_OFFSET_Z; // HAA 오프셋
+        L_1 = params_.HFE_OFFSET;
+        L_2 = params_.KNE_OFFSET + params_.FOOT_OFFSET;
+        HAA_Y = params_.HAA_OFFSET_Y;
+        HAA_Z = params_.HAA_OFFSET_Z;
 
         L_1_sq = L_1 * L_1;
         L_2_sq = L_2 * L_2;
         HAA_Y_sq = HAA_Y * HAA_Y;
         HAA_Z_sq = HAA_Z * HAA_Z;
-
         L_HAA_sq = HAA_Y_sq + HAA_Z_sq;
     }
 
-    bool IKsolver(const Eigen::Vector3f& p_local, float leg_side, float knee_dir, Eigen::Vector3f& out_angles) {
+    bool IKsolver(const Eigen::Vector3f& p_local, int leg_index, float knee_dir, Eigen::Vector3f& out_angles) {
+        // leg_side는 leg_index로부터 자동 도출 (A-1: 파라미터 중복 제거)
+        const float leg_side = deriveLegSide(leg_index);
         float x = p_local.x();
         float y = p_local.y();
         float z = p_local.z();
 
-        // length of offset from HAA to HFE joint
         float L_HAA = std::sqrt(L_HAA_sq);
         float yz_dist_sq = y*y + z*z;
         float yz_dist = std::sqrt(yz_dist_sq);
 
-        // [HAA offset 내부 및 굽힙 sigularity 방어] 목표점이 HAA 오프셋보다 안쪽에 있으면 계산 불가
         if (yz_dist < std::abs(L_HAA)) return false; 
         
         float h = std::sqrt(yz_dist_sq - HAA_Y_sq) - HAA_Z;
@@ -91,11 +93,9 @@ public:
         // knee_dir이 -1.0일 때 -255도처럼 수학적 클램핑 범위를 이탈하지 않도록 괄호로 묶어 부호 전체를 반전시킵니다.
         float theta2 = knee_dir * (beta - (float)M_PI);
         
-        // (선택 사항) 물리적 모터 방향까지 여기서 적용하고 싶다면 cwiseProduct 사용
-        // out_angles = Eigen::Vector3f(theta0, theta1, theta2).cwiseProduct(motor_dir_signs_[...]);
-
-        // 결과 저장
-        out_angles << theta0, theta1, theta2;
+        // 물리적 모터 장착 방향 부호 반영:
+        // LF/LH(0,2)는 기준 방향(+1), RF/RH(1,3)는 뒤집혀 장착(-1)
+        out_angles = Eigen::Vector3f(theta0, theta1, theta2).cwiseProduct(motor_dir_signs_[leg_index]);
         return true; 
     }
 
