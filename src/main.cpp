@@ -1,9 +1,11 @@
+#ifndef CALIBRATION_MODE
+// === Normal Locomotion Firmware ===
+
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 
 #include "quadruped_types.h"
 #include "StateMachine.h"
@@ -13,7 +15,13 @@
 #include "BodyKinematics.h"
 #include "IK.h"
 #include "LocomotionController.h"
+#include "HardwareOutput.h" // Phase 5: Hardware Abstraction Layer
 #include "CommTask.h"   // Phase 2: CommTaskParams 구조체 + commTaskRun()
+
+// --- [DEBUG DWT PROBE START] ---
+// 추후 실제 작동 시 주석 처리할 DWT 타이머 헤더
+#include "dwt_timer.h"  // Phase 3: DWT 타이머 유틸리티
+// --- [DEBUG DWT PROBE END] ---
 
 static const char* TAG = "ROBOT_MAIN";
 
@@ -47,6 +55,24 @@ void CommTaskEntry(void* pvParameters) {
 void ControlTask(void* pvParameters) {
     ESP_LOGI(TAG, "Core 1: ControlTask started (core: %d)", xPortGetCoreID());
 
+    // --- [DEBUG DWT PROBE START] ---
+    // 추후 실제 작동 시 아래 버퍼 할당 및 초기화 코드를 전체 주석 처리하세요.
+    // --- Phase 3 DWT 타이머 및 버퍼 초기화 ---
+    DWT::init();
+    struct TimingRecord {
+        uint32_t loop_idx;
+        float dt_ms;
+        uint32_t exec_us;
+        uint32_t mutex_us;
+        uint32_t pipeline_us;
+        uint8_t deadline_miss;
+    };
+    static TimingRecord timing_buf[400];
+    static int timing_idx = 0;
+    static bool buf_dumped = false;
+    uint32_t loop_counter = 0;
+    // --- [DEBUG DWT PROBE END] ---
+
     // --- 기구학 모듈 인스턴스 (Phase 4에서 실제 파이프라인에 사용) ---
     RobotParams         PARAMS_;
     GaitSequencer       gait_sequencer_(PARAMS_);
@@ -56,6 +82,13 @@ void ControlTask(void* pvParameters) {
     IK                  ik_solver_(PARAMS_);
 
     LocomotionController loco_ctrl_(PARAMS_, gait_sequencer_, foot_planner_, traj_gen_, body_kinematics_, ik_solver_);
+
+    // --- [Phase 5] 하드웨어 출력 레이어 플러그인 ---
+    HardwareOutput hw_out;
+    if (!hw_out.init()) {
+        ESP_LOGE(TAG, "HardwareOutput init failed! Please check I2C wiring.");
+    }
+
 
     // -------------------------------------------------------
     // StateMachine 전이 콜백 등록
@@ -97,6 +130,14 @@ void ControlTask(void* pvParameters) {
         // -------------------------------------------------------
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(CONTROL_DT_MS));
 
+
+        // --- [DEBUG DWT PROBE START] ---
+        // for debug
+        // [Phase 3 Probe] 루프 진입
+        uint32_t t_loop_start = DWT::now_cycles();
+        uint32_t current_pipeline_us = 0;
+        // --- [DEBUG DWT PROBE END] ---
+
         uint64_t current_time = esp_timer_get_time();
         float dt = (current_time - prev_time) / 1000000.0f; // dt는 제어 주기 즉, 무조건 0.02초이어야함
         float dt_ms = (current_time - prev_time) / 1000.0f;
@@ -115,6 +156,12 @@ void ControlTask(void* pvParameters) {
         // 기구학 연산 중에 락을 쥐고 있으면 CommTask를 블로킹하게 된다.
         // -------------------------------------------------------
         SharedData snapshot;
+
+        // --- [DEBUG DWT PROBE START] ---
+        // for debug    
+        uint32_t t_mutex_start = DWT::now_cycles(); // [Phase 3 Probe] Mutex 시작
+        // --- [DEBUG DWT PROBE END] ---
+        
         if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
             snapshot = g_shared;    // 구조체 복사 (얕은 복사, 포인터 없음)
             xSemaphoreGive(g_mutex);
@@ -123,6 +170,10 @@ void ControlTask(void* pvParameters) {
             ESP_LOGW(TAG, "ControlTask: mutex timeout — cycle skipped");
             continue;
         }
+
+        // --- [DEBUG DWT PROBE START] ---
+        uint32_t t_mutex_end = DWT::now_cycles();   // [Phase 3 Probe] Mutex 종료
+        // --- [DEBUG DWT PROBE END] ---
 
         // -------------------------------------------------------
         // Step 2. Watchdog — 통신 두절 감시
@@ -185,7 +236,27 @@ void ControlTask(void* pvParameters) {
                 // -------------------------------------------------------
                 // 보행 파이프라인 연산 (Phase 4)
                 // -------------------------------------------------------
+
+                // --- [DEBUG DWT PROBE START] ---
+                uint32_t t_pipe_start = DWT::now_cycles(); // [Phase 3 Probe] 파이프라인 시작
+                // --- [DEBUG DWT PROBE END] ---
+
                 auto target_angles = loco_ctrl_.processTrot(dt, snapshot.cmd);
+
+                // --- [DEBUG DWT PROBE START] ---
+                uint32_t t_pipe_end = DWT::now_cycles();   // [Phase 3 Probe] 파이프라인 종료
+                current_pipeline_us = (uint32_t)DWT::cycles_to_us(t_pipe_end - t_pipe_start);
+                // --- [DEBUG DWT PROBE END] ---
+
+                // --- [Phase 5] 하드웨어 펄스 출력 (Hardware Abstraction Layer) ---
+                float target_math_angles[4][3];
+                for (int i = 0; i < 4; i++) {
+                    target_math_angles[i][0] = target_angles[i].x(); // HAA
+                    target_math_angles[i][1] = target_angles[i].y(); // HFE
+                    target_math_angles[i][2] = target_angles[i].z(); // KNE
+                }
+                hw_out.writeJoints(target_math_angles);
+
 
                 // [Phase 4 검증] 1초마다: IK 각도 스냅샷 + 범위 검사 + T_cycle 출력
                 // 루프 지연(Deadline Miss) 방지를 위해 로그는 1초에 한 번만 출력합니다.
@@ -207,17 +278,18 @@ void ControlTask(void* pvParameters) {
 
                     // 2. T_cycle 판정
                     float t_cycle = gait_sequencer_.getCycleTime();
-                    ESP_LOGI(TAG, "[Phase4] cmd(vx=%.2f vy=%.2f wz=%.2f) T_cycle=%.3fs",
-                             snapshot.cmd.vx, snapshot.cmd.vy, snapshot.cmd.wz,
-                             t_cycle); 
+                    // velocity 로깅 주석 처리
+                    // ESP_LOGI(TAG, "[Phase4] cmd(vx=%.2f vy=%.2f wz=%.2f) T_cycle=%.3fs",
+                    //          snapshot.cmd.vx, snapshot.cmd.vy, snapshot.cmd.wz,
+                    //          t_cycle); 
                              
-                    // 3. IK 각도 출력
-                    ESP_LOGI(TAG, "IK[LF]: %.2f %.2f %.2f | IK[RF]: %.2f %.2f %.2f",
-                             target_angles[0].x(), target_angles[0].y(), target_angles[0].z(),
-                             target_angles[1].x(), target_angles[1].y(), target_angles[1].z());
-                    ESP_LOGI(TAG, "IK[LH]: %.2f %.2f %.2f | IK[RH]: %.2f %.2f %.2f",
-                             target_angles[2].x(), target_angles[2].y(), target_angles[2].z(),
-                             target_angles[3].x(), target_angles[3].y(), target_angles[3].z());
+                    // // 3. IK 각도 출력
+                    // ESP_LOGI(TAG, "IK[LF]: %.2f %.2f %.2f | IK[RF]: %.2f %.2f %.2f",
+                    //          target_angles[0].x(), target_angles[0].y(), target_angles[0].z(),
+                    //          target_angles[1].x(), target_angles[1].y(), target_angles[1].z());
+                    // ESP_LOGI(TAG, "IK[LH]: %.2f %.2f %.2f | IK[RH]: %.2f %.2f %.2f",
+                    //          target_angles[2].x(), target_angles[2].y(), target_angles[2].z(),
+                    //          target_angles[3].x(), target_angles[3].y(), target_angles[3].z());
                              
                     last_ik_log = current_time;
                 }
@@ -242,7 +314,43 @@ void ControlTask(void* pvParameters) {
 
         uint64_t loop_end_time = esp_timer_get_time();
         float execution_time_ms = (loop_end_time - loop_start_time) / 1000.0f;
-        
+         
+        // --- [DEBUG DWT PROBE START] ---
+        // for debug
+        uint32_t t_loop_end = DWT::now_cycles(); // [Phase 3 Probe] 루프 종료
+
+        if (!buf_dumped && timing_idx < 400 && g_sm.getState() == RobotState::TROT) {
+            TimingRecord& r = timing_buf[timing_idx++];
+            r.loop_idx = loop_counter;
+            r.dt_ms = dt_ms;
+            r.exec_us = (uint32_t)DWT::cycles_to_us(t_loop_end - t_loop_start);
+            r.mutex_us = (uint32_t)DWT::cycles_to_us(t_mutex_end - t_mutex_start);
+            r.pipeline_us = current_pipeline_us;
+            r.deadline_miss = (dt_ms > CONTROL_DT_MS + 1.0f) ? 1 : 0;
+            
+            if (timing_idx == 400) { // 버퍼 포화 시 1회 일괄 덤프
+                buf_dumped = true;
+                ESP_LOGI(TAG, "--- DWT Timing Buffer Dump ---");
+                printf("idx, dt_ms, exec_us, mutex_us, pipeline_us, miss\n");
+                for (int i = 0; i < 400; i++) {
+                    TimingRecord& tr = timing_buf[i];
+                    printf("%lu,%.2f,%lu,%lu,%lu,%d\n", 
+                        (unsigned long)tr.loop_idx, 
+                        tr.dt_ms, 
+                        (unsigned long)tr.exec_us, 
+                        (unsigned long)tr.mutex_us, 
+                        (unsigned long)tr.pipeline_us, 
+                        tr.deadline_miss);
+                    if ((i + 1) % 32 == 0) {
+                        vTaskDelay(pdMS_TO_TICKS(1)); // UART FIFO 넘침 방지
+                    }
+                }
+                ESP_LOGI(TAG, "--- Dump Complete ---");
+            }
+        }
+        loop_counter++;
+        // --- [DEBUG DWT PROBE END] ---
+
         // 디버그/검증용: 1초에 한 번만 출력하도록 하면 로그 도배를 막을 수 있지만, 
         // Phase 3 타이밍 측정 목적이므로 지속적으로 실행시간 관찰이 필요하다면 아래처럼 출력할 수 있습니다.
         // (단, printf 자체가 1ms 정도 소요될 수 있으므로 측정 이후 마지막에 실행해야 합니다)
@@ -288,7 +396,7 @@ extern "C" void app_main(void) {
     // 스택 8192B: Eigen 행렬 연산 + 기구학 모듈 지역 변수 여유분
     // 우선순위 2 (높음): 20ms 정주기 보장이 최우선
     xTaskCreatePinnedToCore(
-        ControlTask, "ControlTask", 8192, NULL, 2, NULL, 1); // 무슨함수임
+        ControlTask, "ControlTask", 12288, NULL, 2, NULL, 1); // 무슨함수임
 
     ESP_LOGI(TAG, "All tasks created. Scheduler running.");
 }
@@ -371,3 +479,5 @@ static void runStateMachineTest() {
     ESP_LOGI(TAG, "====================================");
 }
 #endif  // Phase 1 테스트 — 검증 완료 후 비활성화
+
+#endif // !CALIBRATION_MODE
