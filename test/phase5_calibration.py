@@ -24,6 +24,8 @@ import sys
 import json
 import os
 import time
+import tty
+import termios
 from datetime import datetime
 
 # =============================================================
@@ -151,6 +153,100 @@ def save_offset_to_log(ch: int, measured_us: float, response: str):
 
 
 # =============================================================
+# Jog Control
+# =============================================================
+def _read_key() -> str:
+    """Read a single keypress (raw mode). Returns a string token."""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == '\x1b':
+            # Escape sequence — read up to 2 more bytes
+            next1 = sys.stdin.read(1)
+            if next1 == '[':
+                next2 = sys.stdin.read(1)
+                return f'\x1b[{next2}'   # e.g. '\x1b[A'
+            return '\x1b'
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def _us_to_deg(us: float) -> float:
+    """Convert PWM microseconds to approximate angle (500us=0°, 2500us=180°)."""
+    return (us - 500.0) / 2000.0 * 180.0
+
+
+def run_jog(client: CalibrationClient, ch: int, start_us: float = 1500.0):
+    """
+    Interactive jog mode.
+
+    Keys:
+        ↑  / ↓   : ±10 us
+        →  / ←   : ±1 us  (fine)
+        S        : save_offset at current position
+        Q / Esc  : exit jog mode
+    """
+    current_us = float(start_us)
+    PWM_MIN, PWM_MAX = 500.0, 2500.0
+    ch_name = get_channel_name(ch)
+
+    print(f"\n[JOG] Channel {ch} ({ch_name})  start={int(current_us)}us")
+    print("[JOG] ↑/↓ = ±10us   →/← = ±1us   S = save_offset   Q/Esc = quit\n")
+
+    # Move to start position immediately
+    client.send_command(f"set_pwm {ch} {current_us}")
+
+    def _status_line():
+        deg = _us_to_deg(current_us)
+        return (f"\r[JOG] ch={ch} ({ch_name})  "
+                f"PWM={int(current_us):4d}us  angle≈{deg:6.1f}°   "
+                f"(↑↓±10  ←→±1  S=save  Q=quit)  ")
+
+    sys.stdout.write(_status_line())
+    sys.stdout.flush()
+
+    while True:
+        key = _read_key()
+
+        if key == '\x1b[A':      # ↑
+            delta = +10.0
+        elif key == '\x1b[B':    # ↓
+            delta = -10.0
+        elif key == '\x1b[C':    # →
+            delta = +1.0
+        elif key == '\x1b[D':    # ←
+            delta = -1.0
+        elif key.lower() == 's':
+            # Save offset at current position
+            print()
+            save_offset_to_log(ch, current_us, "")
+            sys.stdout.write(_status_line())
+            sys.stdout.flush()
+            continue
+        elif key.lower() in ('q', '\x1b', '\x03'):   # Q / Esc / Ctrl-C
+            print(f"\n[JOG] Exited. Final PWM={int(current_us)}us "
+                  f"(≈{_us_to_deg(current_us):.1f}°)")
+            break
+        else:
+            continue
+
+        new_us = current_us + delta
+        if new_us < PWM_MIN:
+            new_us = PWM_MIN
+        elif new_us > PWM_MAX:
+            new_us = PWM_MAX
+
+        if new_us != current_us:
+            current_us = new_us
+            client.send_command(f"set_pwm {ch} {current_us}")
+            sys.stdout.write(_status_line())
+            sys.stdout.flush()
+
+
+# =============================================================
 # Sweep Test
 # =============================================================
 def run_sweep(client: CalibrationClient, ch: int):
@@ -203,15 +299,16 @@ HELP_TEXT = """
   Phase 5 Servo Calibration Tool - Commands
 ========================================================
 
-  set_angle <ch> <deg>     Move servo to angle (0-180 clamped)
-  set_pwm <ch> <usec>      Direct PWM control (raw, no clamping)
-  get_status               Query all 12 channels
-  save_offset <ch> <usec>  Record offset -> generates servo_config.h
-  set_board_freq <freq>    Update board oscillator freq (e.g. 25000000)
-  sweep <ch>               Auto sweep angle: 0->90->180->90->0
-  sweep_pwm <ch> <min> <max> Auto sweep PWM: min->mid->max->mid->min
-  help                     Show this help
-  quit / exit              Exit
+  set_angle <ch> <deg>         Move servo to angle (0-180 clamped)
+  set_pwm <ch> <usec>          Direct PWM control (raw, no clamping)
+  get_status                   Query all 12 channels
+  save_offset <ch> <usec>      Record offset -> generates servo_config.h
+  set_board_freq <freq>        Update board oscillator freq (e.g. 25000000)
+  sweep <ch>                   Auto sweep angle: 0->90->180->90->0
+  sweep_pwm <ch> <min> <max>   Auto sweep PWM: min->mid->max->mid->min
+  jog <ch> [start_us]          Keyboard jog mode (↑↓±10us  ←→±1us  S=save  Q=quit)
+  help                         Show this help
+  quit / exit                  Exit
 
   Channel Map (ch -> Leg_Joint):
     0=LF_HAA  1=LF_HFE  2=LF_KNE
@@ -284,6 +381,18 @@ def main():
                     print("[ERROR] sweep_pwm <channel> <min_us> <max_us>")
             else:
                 print("[ERROR] Usage: sweep_pwm <ch> <min_us> <max_us>")
+            continue
+        elif cmd.lower().startswith("jog"):
+            parts = cmd.split()
+            if len(parts) >= 2:
+                try:
+                    ch = int(parts[1])
+                    start_us = float(parts[2]) if len(parts) >= 3 else 1500.0
+                    run_jog(client, ch, start_us)
+                except ValueError:
+                    print("[ERROR] jog <channel> [start_us]")
+            else:
+                print("[ERROR] Usage: jog <ch> [start_us]")
             continue
         elif cmd.lower().startswith("sweep"):
             parts = cmd.split()

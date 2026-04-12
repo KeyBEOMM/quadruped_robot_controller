@@ -35,16 +35,19 @@ private:
     float motor_dir[4][3] = {
         { 1.0f,  1.0f,  1.0f}, // LF
         {-1.0f, -1.0f, -1.0f}, // RF
-        { 1.0f,  1.0f,  1.0f}, // LH
-        {-1.0f, -1.0f, -1.0f}  // RH
+        {-1.0f,  1.0f,  1.0f}, // LH (HAA: YZ 평면 대칭 장착으로 반전)
+        { 1.0f, -1.0f, -1.0f}  // RH (HAA: YZ 평면 대칭 장착으로 반전)
     };
     
-    // Mount Offset (rad) - Middle position of the servo (usually 90 degrees if horn is attached precisely).
+    // Mount Offset (rad) - Physical servo angle when math angle = 0.
+    // HAA : 90°  — symmetric ±90° global range
+    // HFE : 120° — 30° backward bias; trot standing (θ=-60°) → servo 60°, bowing range secured
+    // KFE : 180° — 90° perpendicular assembly; singularity (full extension) mapped to servo 180° → clamped to 175°
     float mount_offset_rad[4][3] = {
-        {M_PI/2, M_PI/2, M_PI/2},
-        {M_PI/2, M_PI/2, M_PI/2},
-        {M_PI/2, M_PI/2, M_PI/2},
-        {M_PI/2, M_PI/2, M_PI/2}
+        {M_PI/2, 2.0f*M_PI/3.0f, M_PI},  // LF [HAA=90°, HFE=120°, KFE=180°]
+        {M_PI/2, 2.0f*M_PI/3.0f, M_PI},  // RF
+        {M_PI/2, 2.0f*M_PI/3.0f, M_PI},  // LH
+        {M_PI/2, 2.0f*M_PI/3.0f, M_PI}   // RH
     };
 
     float prev_angles_rad[4][3] = {{0}};

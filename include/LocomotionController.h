@@ -145,8 +145,9 @@ public:
 
         // 4. IK 연산 수행 (Hold 버퍼 포함)
         for (int i = 0; i < 4; ++i) {
-            // knee_dir: 현재 무릎 굽힘 방향 고정 가정 (기구 모델에 따라 -1.0f로 세팅)
-            float knee_dir = -1.0f; 
+            // knee_dir: '<' 형태 (포유류형, 후방 무릎) = +1.0f
+            // API_REFERENCE.md 설계 기준에 맞게 수정 (기존 -1.0f는 오설정이었음)
+            float knee_dir = 1.0f;
 
             Eigen::Vector3f angles;
             bool ok = ik_solver_.IKsolver(foot_pos_local[i], i, knee_dir, angles);

@@ -11,8 +11,8 @@ private:
     const Eigen::Vector3f motor_dir_signs_[4] = {
         { 1.0f,  1.0f,  1.0f},  // LF
         {-1.0f, -1.0f, -1.0f},  // RF (모터가 뒤집혀 장착됨)
-        { 1.0f,  1.0f,  1.0f},  // LH
-        {-1.0f, -1.0f, -1.0f}   // RH
+        {-1.0f,  1.0f,  1.0f},  // LH (HAA: YZ 평면 대칭 장착으로 반전)
+        { 1.0f, -1.0f, -1.0f}   // RH (HAA: YZ 평면 대칭 장착으로 반전)
     };
     // leg_side는 leg_index로부터 결정론적으로 도출: 좌측(0,2)=+1.0, 우측(1,3)=-1.0
     static constexpr float deriveLegSide(int leg_index) {
