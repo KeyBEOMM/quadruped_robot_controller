@@ -25,9 +25,10 @@
 6. [BodyKinematics (`BodyKinematics.h`)](#6-bodykinematics)
 7. [IK (`IK.h`)](#7-ik-역운동학)
 8. [LocomotionController (`LocomotionController.h`)](#8-locomotioncontroller)
-9. [CommTask (`CommTask.h`)](#9-commtask-통신-인프라)
-10. [FreeRTOS 핵심 API 정리](#10-freertos-핵심-api-정리)
-11. [전체 데이터 흐름도](#11-전체-데이터-흐름도)
+9. [PCA9685 & HardwareOutput (`HardwareOutput.h`)](#9-pca9685--hardwareoutput-하드웨어-출력)
+10. [CommTask (`CommTask.h`)](#10-commtask-통신-인프라)
+11. [FreeRTOS 핵심 API 정리](#11-freertos-핵심-api-정리)
+12. [전체 데이터 흐름도](#12-전체-데이터-흐름도)
 
 ---
 
@@ -131,8 +132,8 @@ Core 0(CommTask)이 쓰고 Core 1(ControlTask)이 읽는 공유 메모리. **반
 
 | 상수 | 값 | 의미 |
 |---|---|---|
-| `CONTROL_DT_MS` | `20` ms | 제어 루프 목표 주기 (50Hz) |
-| `CONTROL_DT_S` | `0.020f` s | 제어 루프 주기 (소수 표현) |
+| `CONTROL_DT_MS` | `10` ms | 제어 루프 목표 주기 (100Hz) |
+| `CONTROL_DT_S` | `0.010f` s | 제어 루프 주기 (소수 표현) |
 | `WATCHDOG_TIMEOUT_MS` | `100` ms | 통신 두절 판정 임계 시간 |
 | `INIT_DURATION_S` | `3.0f` s | Soft-Start 기립 보간 시간 |
 
@@ -466,11 +467,39 @@ LocomotionController(RobotParams& params, GaitSequencer& seq, FootPosPlanner& pl
 
 ---
 
-## 9. CommTask (통신 인프라)
+## 9. PCA9685 & HardwareOutput (하드웨어 출력)
+
+**파일:** [`include/PCA9685.h`](../include/PCA9685.h), [`include/HardwareOutput.h`](../include/HardwareOutput.h)  
+**역할:** IK에서 도출된 수학적 타겟 각도를 물리적 PWM 신호로 변환하여 서보 모터를 제어하고, 기구 보호를 위한 안전장치를 수행한다.
+
+---
+
+### PCA9685 (저수준 I2C 통신)
+- **주요 함수:** `begin(sda, scl, clk_speed)`, `setPWMFreq(freqHz)`, `setPWM(channel, on, off)`
+- **특징:** ESP-IDF 기반 I2C 마스터를 생성하여 통신(기본 SDA=21, SCL=22). 디지털 서보 대응을 위해 주파수를 100Hz로 설정. 
+
+추후 최대 : 내부 연산 주기를 250 Hz로 잡고 있음 & 그 사이의 명령은 spline 보간
+
+---
+
+### HardwareOutput (고수준 매핑 & 안전 제어)
+역기구학 연산 결과 `target_math_angles[4][3]`를 받아 물리적 제어로 안전하게 이관.
+
+- **Zero-Offset Matrix (`zero_offset`)**: 서보 조립 후 발생하는 물리적 영점 오차 보정 배열.
+- **Direction Reversal (`motor_dir`)**: 좌우 대칭 조립으로 인한 서보 회전 방향(부호) 역전 보정 배열.
+- **Rate Limiting (`max_delta_rad`)**: `|Δθ| > max_delta_rad` 시 변화량을 강제 제한하여 과도한 전류 소모 및 기어 파손 방지 (최대 4.65 rad/s 제한 보장).
+- **Deadband (`deadband_rad`)**: `|Δθ| < 0.5°` 미만일 경우 이전 각도 유지 (미세 진동/채터링 원천 억제).
+- **Safety Clamping**: 모터 구동 범위를 `5° ~ 175°` 로 강제 제한하여 물리적 프레임 충돌 방지.
+- **PWM 변환**: 최종 물리 각도를 `500μs ~ 2500μs` 로 선형 변환하여 PCA9685 채널 `0~11`에 순차 송신.
+
+---
+
+## 10. CommTask (통신 인프라)
 
 **파일:** [`include/CommTask.h`](../include/CommTask.h)  
 **역할:** Core 0에서 실행되는 WiFi UDP 수신 루프. 패킷 수신 → 파싱 → `SharedData` 갱신 → 리셋 명령 처리의 전 과정을 담당한다.
 
+atomic이나 고성능 Queue 방식 도입도 검토
 ---
 
 ### UDP 패킷 포맷 (Host → ESP32, 28바이트 고정, 리틀엔디언)
@@ -529,7 +558,7 @@ LocomotionController(RobotParams& params, GaitSequencer& seq, FootPosPlanner& pl
 
 ---
 
-## 10. FreeRTOS 핵심 API 정리
+## 11. FreeRTOS 핵심 API 정리
 
 이 프로젝트에서 자주 등장하는 FreeRTOS / ESP-IDF API를 한 곳에 정리한다.
 
@@ -638,7 +667,7 @@ uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
 ---
 
-## 11. 전체 데이터 흐름도
+## 12. 전체 데이터 흐름도
 
 ```
 [상위 제어기 (PC/조이스틱)]

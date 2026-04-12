@@ -70,7 +70,7 @@ struct RobotParams
     const float HEIGHT_RATIO = 0.2f;      // 보폭의 20%만큼 추가로 더 든다.
     const float MAX_STEP_HEIGHT = 0.05f;  // 아무리 빨리 뛰어도 5cm 이상은 들지 않는다.
     
-    float body_length = 0.255f; // 몸체 길이 (m) 255mm
+    float body_length = 0.2075f; // 몸체 길이 (m) 207.5mm — 전/후 HAA 축 중심 간 거리 (150mm 섀시 + 2×5mm 이너숄더 + 2×23.75mm 블록)
     float body_width = 0.078f;  // 몸체 너비 (m) 78mm
 
     Eigen::Vector3f shoulder_offsets[4] = {
@@ -82,9 +82,9 @@ struct RobotParams
 
     const float HAA_OFFSET_Y = 0.0605f;   // HAA Offset
     const float HAA_OFFSET_Z = 0.01f;
-    const float HFE_OFFSET = 0.1111f; // Upper Link
-    const float KNE_OFFSET = 0.1185f;  // Lower Link
-    const float FOOT_OFFSET = 0.02f; // Foot Link
+    const float HFE_OFFSET = 0.1111f; // Upper Link (L3: sqrt(107²+30²)=111.1mm, cranked 구조 — 혼 장착 시 L3a/L3b 정렬 필요, crank_angle≈15.66°)
+    const float KNE_OFFSET = 0.1185f;  // Lower Link (L4: 118.5mm)
+    const float FOOT_OFFSET = 0.02f; // Foot Link (20mm, 종아리 축 대비 45° 꺾임 — IK 유효 L2 = sqrt(118.5²+20²+2×118.5×20×cos45°) ≈ 133.4mm, Phase 8에서 실측 튜닝)
 };
 
 // ============================================================
@@ -113,7 +113,7 @@ struct SharedData
 // ============================================================
 // 시스템 타이밍 상수
 // ============================================================
-constexpr uint32_t CONTROL_DT_MS = 20;          // 제어 루프 목표 주기 (ms) → 50Hz
-constexpr float    CONTROL_DT_S  = 0.020f;      // 제어 루프 주기 (초)
+constexpr uint32_t CONTROL_DT_MS = 10;          // 제어 루프 목표 주기 (ms) → 100Hz
+constexpr float    CONTROL_DT_S  = 0.010f;      // 제어 루프 주기 (초)
 constexpr uint32_t WATCHDOG_TIMEOUT_MS = 500;    // 통신 두절 판정 임계 시간 (ms) - WiFi 환경 고려 완화
 constexpr float    INIT_DURATION_S = 3.0f;       // Soft-Start 기립 보간 시간 (초)
