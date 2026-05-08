@@ -116,4 +116,8 @@ struct SharedData
 constexpr uint32_t CONTROL_DT_MS = 10;          // 제어 루프 목표 주기 (ms) → 100Hz
 constexpr float    CONTROL_DT_S  = 0.010f;      // 제어 루프 주기 (초)
 constexpr uint32_t WATCHDOG_TIMEOUT_MS = 500;    // 통신 두절 판정 임계 시간 (ms) - WiFi 환경 고려 완화
-constexpr float    INIT_DURATION_S = 3.0f;       // Soft-Start 기립 보간 시간 (초)
+constexpr float    INIT_DURATION_S       = 3.0f;   // Soft-Start 기립 보간 시간 (초)
+constexpr float    PRONE_BODY_HEIGHT_M   = 0.10f;  // INIT 시작 CoM 높이 (m) — 0.10m 이상이어야 LF/LH HFE 서보 클램프 없음
+constexpr float    TRANS_LIFT_HEIGHT_M   = 0.02f;  // TRANSITION 발 Z 리프트 아크 높이 (m)
+constexpr float    TRANSITION_DURATION_S = 0.8f;   // TRANSITION 보간 시간 (초)
+constexpr float    ERROR_DURATION_S      = 1.2f;   // ERROR 보간 시간 (초)

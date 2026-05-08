@@ -168,7 +168,7 @@ void CalibrationTask(void* pvParameters) {
             } else {
                 float clamped = val;
                 if (clamped < 0.0f) clamped = 0.0f;
-                if (clamped > 180.0f) clamped = 180.0f;
+                if (clamped > 175.0f) clamped = 175.0f;
 
                 float pulse_us = 500.0f + (clamped / 180.0f) * 2000.0f;
                 uint16_t ticks = (uint16_t)((pulse_us / 10000.0f) * 4096.0f + 0.5f);

@@ -32,8 +32,9 @@ private:
     float latched_step_height_[4]; // 스텝 높이
     Eigen::Vector3f last_valid_angles_[4]; // 마지막 유효한 각도
 
+public:
     // [A-2] Home Stance 위치 헬퍼 (DRY 해소)
-    // processTrot와 initHomeStance 양쉽에서 동일한 계산식이 중복되지 않도록 단일지점으로 추출
+    // processTrot / initHomeStance / InterpolationGenerator 공용
     Eigen::Vector3f getHomePos(int i) const {
         const float leg_side = (i == 0 || i == 2) ? 1.0f : -1.0f;
         return Eigen::Vector3f(
@@ -43,7 +44,7 @@ private:
         );
     }
 
-public:
+
     // 현재 프레임에서 도출된 4다리의 글로벌(지면) 기준 발 좌표
     std::array<Eigen::Vector3f, 4> foot_pos_global_;
 

@@ -1,6 +1,6 @@
 # 📖 Quadruped Robot Controller — API Reference & Architecture Guide
 
-> **최종 갱신:** 2026-03-21  
+> **최종 갱신:** 2026-05-07  
 > **대상 펌웨어:** ESP32 / ESP-IDF (FreeRTOS)  
 > **이 문서의 목적:** 프로젝트에 새로 참여하거나 잠시 떠났다 돌아온 개발자가 **코드를 보지 않고도** 각 모듈의 역할, 입출력, 호출 규칙을 즉시 파악할 수 있도록 작성된 단일 참조 문서다.
 
@@ -25,10 +25,11 @@
 6. [BodyKinematics (`BodyKinematics.h`)](#6-bodykinematics)
 7. [IK (`IK.h`)](#7-ik-역운동학)
 8. [LocomotionController (`LocomotionController.h`)](#8-locomotioncontroller)
-9. [PCA9685 & HardwareOutput (`HardwareOutput.h`)](#9-pca9685--hardwareoutput-하드웨어-출력)
-10. [CommTask (`CommTask.h`)](#10-commtask-통신-인프라)
-11. [FreeRTOS 핵심 API 정리](#11-freertos-핵심-api-정리)
-12. [전체 데이터 흐름도](#12-전체-데이터-흐름도)
+9. [InterpolationGenerator (`InterpolationGenerator.h`)](#9-interpolationgenerator)
+10. [PCA9685 & HardwareOutput (`HardwareOutput.h`)](#10-pca9685--hardwareoutput-하드웨어-출력)
+11. [CommTask (`CommTask.h`)](#11-commtask-통신-인프라)
+12. [FreeRTOS 핵심 API 정리](#12-freertos-핵심-api-정리)
+13. [전체 데이터 흐름도](#13-전체-데이터-흐름도)
 
 ---
 
@@ -134,8 +135,12 @@ Core 0(CommTask)이 쓰고 Core 1(ControlTask)이 읽는 공유 메모리. **반
 |---|---|---|
 | `CONTROL_DT_MS` | `10` ms | 제어 루프 목표 주기 (100Hz) |
 | `CONTROL_DT_S` | `0.010f` s | 제어 루프 주기 (소수 표현) |
-| `WATCHDOG_TIMEOUT_MS` | `100` ms | 통신 두절 판정 임계 시간 |
-| `INIT_DURATION_S` | `3.0f` s | Soft-Start 기립 보간 시간 |
+| `WATCHDOG_TIMEOUT_MS` | `500` ms | 통신 두절 판정 임계 시간 |
+| `INIT_DURATION_S` | `3.0f` s | INIT 보간 총 시간 |
+| `PRONE_BODY_HEIGHT_M` | `0.05f` m | INIT 시작 CoM 높이 (엎드린 자세). IK 안전 하한 ≈ 0.038m |
+| `TRANS_LIFT_HEIGHT_M` | `0.02f` m | TRANSITION 발 Z 리프트 아크 최대 높이 (발끌림 방지) |
+| `TRANSITION_DURATION_S` | `0.8f` s | TRANSITION 보간 총 시간 |
+| `ERROR_DURATION_S` | `1.2f` s | ERROR 보간 총 시간 |
 
 ---
 
@@ -354,17 +359,21 @@ const float getCycleTime() const;
 
 ### 주요 함수
 
-#### `transformToLocal(cmd, foot_pos_global, out_foot_pos_local)`
+#### `transformToLocal(cmd, foot_pos_global, out_foot_pos_local, body_height = -1.0f)`
 ```
 입력: cmd                — roll, pitch, yaw 명령값 포함
       foot_pos_global[4] — 발 위치 (글로벌 좌표, Eigen::Vector3f 배열)
+      body_height        — CoM 높이 오버라이드 (m). 0 이하이면 params_.default_height 사용.
+                           기본값 -1.0f (= default_height 사용). 하위 호환 유지.
 출력: out_foot_pos_local[4] — 어깨 기준 로컬 좌표 (IK 입력용)
 ```
+
+> **body_height 사용처:** `InterpolationGenerator`의 INIT 보간에서 `PRONE_BODY_HEIGHT_M → default_height` 로 넘겨 기립 효과를 낸다. 보행 파이프라인(`processTrot`)은 기본값을 그대로 사용한다.
 
 **좌표 변환 순서:**
 1. Z-Y-X 오일러각으로 회전 행렬 `R_body` 생성
 2. `R_body_T = R_body.transpose()` (역회전, SO(3)에서 전치 = 역행렬)
-3. `pos_relative_to_CoM = foot_pos_global[i] - P_CoM` (CoM은 Z=default_height)
+3. `pos_relative_to_CoM = foot_pos_global[i] - P_CoM` (CoM은 Z=`body_height`)
 4. `pos_rotated = R_body_T * pos_relative_to_CoM`
 5. `out_local[i] = pos_rotated - shoulder_offsets[i]` (어깨 기준화)
 
@@ -420,7 +429,7 @@ IK(const RobotParams& params);
 | LH | 2 | +1.0 | +1.0 |
 | RH | 3 | -1.0 | +1.0 |
 
-> ⚠️ `motor_dir_signs_`(하드웨어 부착 방향 보정)는 IK.h 내부에 정의되어 있지만 현재 `IKsolver` 출력에는 미적용 상태다. **Phase 5 HardwareOutput에서 별도 적용 예정**.
+> `motor_dir_signs_`(하드웨어 부착 방향 보정)는 IK.h 내부에 정의되어 있으며 `IKsolver` 출력에 적용된다. HardwareOutput의 `motor_dir`와 동일한 부호를 가지므로 두 번 적용되어 상쇄 → 최종 물리 변환은 `mount_offset + theta_raw + zero_offset` 으로 귀결된다.
 
 ---
 
@@ -459,15 +468,119 @@ LocomotionController(RobotParams& params, GaitSequencer& seq, FootPosPlanner& pl
 4. `transformToLocal()`: 글로벌 발 좌표 → 어깨 기준 로컬 좌표 변환
 5. `IKsolver()`: 3개 관절 각도 산출. 도달 불가 시 `last_valid_angles_` (Hold Buffer) 사용
 
+#### `getHomePos(int i)` — public
+```
+입력: i — 다리 인덱스 (0=LF, 1=RF, 2=LH, 3=RH)
+반환: Eigen::Vector3f — 다리 i 의 Home Stance 글로벌 발 위치
+      = (shoulder_x, shoulder_y ± HAA_OFFSET_Y, 0.0f)
+```
+`InterpolationGenerator::setHomePositions()` 호출 시 사용. `processTrot` 내부의 `swing_end_pos` 계산과 동일한 단일 지점(DRY).
+
 #### `initHomeStance()`
-모든 다리를 기본 착지점(Home Stance) 좌표로 리셋합니다. `IDLE` 상태 등 정지 유지 시 호출.
-> **개발자 노트 (Home 좌표 설정):**
-> 현재 Home 좌표는 각 다리의 어깨 관절(Shoulder) 수직 아래 방향으로 `Z = 0.0f` (지면) 지점입니다. 
-> 동체의 기본 높이(`default_height = 0.164m`)가 수학적으로 결합되어, 이 목표 좌표를 IK에 넣으면 다리가 완전히 펴지지 않고 **무릎이 약 30도 굽혀진 자연스러운 대기 자세(살짝 앉은 자세)**가 자동으로 산출됩니다. (별도의 하드웨어 모터 각도 보정 없이도 기구학적으로 올바른 대기 각도가 출력됩니다.)
+모든 다리를 기본 착지점(Home Stance) 좌표로 리셋합니다. `IDLE` 진입 콜백에서 호출.
+> Home 좌표는 각 다리의 어깨 관절 직하방 `Z = 0.0f` 지점. `default_height = 0.164m` 가 IK에서 결합되어 무릎이 약 30° 굽혀진 자연스러운 대기 자세가 산출된다.
 
 ---
 
-## 9. PCA9685 & HardwareOutput (하드웨어 출력)
+## 9. InterpolationGenerator
+
+**파일:** [`include/InterpolationGenerator.h`](../include/InterpolationGenerator.h)  
+**역할:** `INIT` / `TRANSITION` / `ERROR` 세 가지 비보행 상태에서 매 루프 호출되어 관절 목표각을 보간 생성한다. 출력 형식은 `HardwareOutput::writeJoints()`에 직접 넘길 수 있는 `float[4][3]` (IK output 공간).
+
+---
+
+### 생성자
+
+```cpp
+InterpolationGenerator(IK& ik, BodyKinematics& bk, const RobotParams& params);
+```
+세 모듈의 참조를 받아 내부 IK 연산에 재사용한다. 힙 할당 없음.
+
+---
+
+### 초기화
+
+#### `setHomePositions(const std::array<Eigen::Vector3f, 4>& home)`
+ControlTask 초기화 단계에서 **1회만** 호출. `LocomotionController::getHomePos(i)` 로 계산한 Home 발 위치를 등록한다. 이후 모든 보간의 종점으로 사용된다.
+
+---
+
+### 상태 진입 시 호출 (StateMachine 콜백에서 호출)
+
+#### `startINIT(float duration_s)`
+- 엎드린 자세(CoM 높이 `PRONE_BODY_HEIGHT_M = 0.05m`)에서 기립(`default_height = 0.164m`)하는 Cartesian 보간 시작.
+- 발은 `home_pos` 에 고정, CoM 높이만 Smoothstep 변화 → `transformToLocal`에 높이 주입.
+
+#### `startTRANSITION(const std::array<Eigen::Vector3f, 4>& start_foot, float duration_s)`
+- 현재 발 위치(`loco_ctrl_.foot_pos_global_`) → `home_pos` 로 이동하는 Cartesian 보간 시작.
+- XY: Smoothstep 보간 / Z: `lerp + TRANS_LIFT_HEIGHT_M × sin(π·t)` 아크 추가 (발끌림 방지).
+
+#### `startERROR(const float start_angles[4][3], float duration_s)`
+- 현재 관절각(`current_hw_angles`) → `[0, 0, 0]` (prone) 로 Joint-space Smoothstep 보간 시작.
+- 완료 후 `LOCKED` 상태 진입 → 이후 `update()` 호출 시 `cur_` 갱신 없이 마지막 자세 유지.
+
+---
+
+### 매 루프 호출
+
+#### `update(float dt)` → `bool`
+```
+입력: dt — 루프 경과 시간 (초)
+반환: true  — 보간 완료 (또는 LOCKED 상태)
+      false — 보간 진행 중
+```
+
+| 내부 분기 | 동작 |
+|---|---|
+| `INIT` | `h = lerp(h_start, h_end, smoothstep(t))` → `runIK(home_pos, h)` |
+| `TRANSITION` | `fp[i] = lerp(start, home, s) + z_arc` → `runIK(fp, default_height)` |
+| `ERROR_COLLAPSE` | `cur_[i][j] = lerp(start, 0, s)` (IK 없음) |
+
+> **IK 실패 보호:** `runIK` 내부에서 IK가 `false`를 반환하면 `last_valid_` (직전 유효각)를 `cur_`에 복사(Hold).
+
+#### `getCurrentAngles(float out[4][3]) const`
+현재 보간 결과를 `out` 에 복사. `hw_out.writeJoints(out)` 에 바로 전달 가능.
+
+#### `isLocked() const` → `bool`
+ERROR 보간 완료 후 Lock 상태 여부. `true` 이면 `update()` 를 호출하지 않아도 되며, 서보 토크 유지를 위해 `writeJoints()` 는 계속 호출해야 한다.
+
+---
+
+### 보간 곡선
+
+| 함수 | 수식 | 특성 |
+|---|---|---|
+| Smoothstep | `t²(3−2t)` | 시작/끝 속도 = 0, 부드러운 S-커브 |
+| Z arc (TRANSITION) | `LIFT_H × sin(π·t)` | 중간 정점, 시작/끝 Z = 0 |
+
+---
+
+### main.cpp 통합 패턴
+
+```cpp
+// 초기화
+InterpolationGenerator interp_(ik_solver_, body_kinematics_, PARAMS_);
+interp_.setHomePositions(home_arr);
+
+// 콜백
+g_sm.on_enter_init_       = [&]() { interp_.startINIT(INIT_DURATION_S); };
+g_sm.on_enter_transition_ = [&]() { interp_.startTRANSITION(loco_ctrl_.foot_pos_global_, ...); };
+g_sm.on_enter_error_      = [&]() { interp_.startERROR(current_hw_angles, ...); };
+
+// 루프 (INIT / TRANSITION 동일 패턴)
+if (interp_.update(dt)) g_sm.onInitComplete();
+interp_.getCurrentAngles(current_hw_angles);
+hw_out.writeJoints(current_hw_angles);
+
+// ERROR (Lock 후에도 writeJoints 유지)
+if (!interp_.isLocked()) interp_.update(dt);
+interp_.getCurrentAngles(current_hw_angles);
+hw_out.writeJoints(current_hw_angles);
+```
+
+---
+
+## 10. PCA9685 & HardwareOutput (하드웨어 출력)
 
 **파일:** [`include/PCA9685.h`](../include/PCA9685.h), [`include/HardwareOutput.h`](../include/HardwareOutput.h)  
 **역할:** IK에서 도출된 수학적 타겟 각도를 물리적 PWM 신호로 변환하여 서보 모터를 제어하고, 기구 보호를 위한 안전장치를 수행한다.
@@ -494,7 +607,7 @@ LocomotionController(RobotParams& params, GaitSequencer& seq, FootPosPlanner& pl
 
 ---
 
-## 10. CommTask (통신 인프라)
+## 11. CommTask (통신 인프라)
 
 **파일:** [`include/CommTask.h`](../include/CommTask.h)  
 **역할:** Core 0에서 실행되는 WiFi UDP 수신 루프. 패킷 수신 → 파싱 → `SharedData` 갱신 → 리셋 명령 처리의 전 과정을 담당한다.
@@ -558,7 +671,7 @@ atomic이나 고성능 Queue 방식 도입도 검토
 
 ---
 
-## 11. FreeRTOS 핵심 API 정리
+## 12. FreeRTOS 핵심 API 정리
 
 이 프로젝트에서 자주 등장하는 FreeRTOS / ESP-IDF API를 한 곳에 정리한다.
 
@@ -667,7 +780,7 @@ uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
 ---
 
-## 12. 전체 데이터 흐름도
+## 13. 전체 데이터 흐름도
 
 ```
 [상위 제어기 (PC/조이스틱)]
@@ -704,10 +817,25 @@ uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
           │    → HardwareOutput (Phase 5~)
           │         Zero-Offset → Clamping → Rate Limit → Deadband → PWM
           │
-          ├─ INIT / TRANSITION / ERROR:
-          │    InterpolationGenerator (Phase 6~)
+          ├─ INIT (3s, Cartesian, CoM 높이 보간):
+          │    InterpolationGenerator::update(dt)
+          │    → runIK(home_pos, h)  h: 0.05m→0.164m Smoothstep
+          │    → getCurrentAngles() → hw_out.writeJoints()
+          │    → done → sm.onInitComplete() → IDLE
           │
-          └─ IDLE: Home Stance 유지
+          ├─ TRANSITION (0.8s, Cartesian, XY+Z arc):
+          │    InterpolationGenerator::update(dt)
+          │    → fp[i] = lerp(start, home, s) + LIFT×sin(πt)
+          │    → runIK(fp, default_height)
+          │    → getCurrentAngles() → hw_out.writeJoints()
+          │    → done → sm.onTransitionComplete() → IDLE
+          │
+          ├─ ERROR (1.2s, Joint-space → prone → LOCK):
+          │    InterpolationGenerator::update(dt) (isLocked 아닌 동안)
+          │    → cur_[i][j] = lerp(start, 0, s)  [IK 없음]
+          │    → getCurrentAngles() → hw_out.writeJoints()  (LOCK 후에도 유지)
+          │
+          └─ IDLE: hw_out.writeJoints(current_hw_angles) 매 프레임 유지
 ```
 
 ---
@@ -715,4 +843,4 @@ uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 > 📝 **문서 기여 가이드**  
 > - 새 모듈 추가 시: 해당 섹션을 동일한 포맷(`역할 → 생성자 → 주요 함수 → 입출력 표`)으로 추가한다.  
 > - 파라미터 변경 시: §1의 `RobotParams` 표를 함께 갱신한다.  
-> - 검증 완료된 Phase가 있다면: `§10 데이터 흐름도`에서 해당 파이프라인 주석(`Phase N~`)을 업데이트한다.
+> - 검증 완료된 Phase가 있다면: `§13 데이터 흐름도`에서 해당 파이프라인 주석을 업데이트한다.

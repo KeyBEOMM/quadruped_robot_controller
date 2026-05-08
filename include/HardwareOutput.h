@@ -12,7 +12,7 @@ private:
     
     // Limits
     const float min_angle_deg = 0.0f;
-    const float max_angle_deg = 180.0f;
+    const float max_angle_deg = 175.0f;
     
     // PWM Pulse bounds (20kg standard servo: 500us ~ 2500us for 0 ~ 180 degrees)
     const float pwm_min_us = 500.0f;
@@ -30,24 +30,27 @@ private:
     
     // Direction Reversal
     // 1.0 = normal (CCW increases angle), -1.0 = flipped (CW increases angle)
-    // Left/Right symmetry means opposite sides operate reversed.
-    // Must be verified and adjusted during physical calibration!
+    // LF HFE: CCW(+) → thigh moves backward → motor_dir=-1 (same as RF)
+    // RF HFE: CW(-) → thigh moves backward → motor_dir=-1
     float motor_dir[4][3] = {
-        { 1.0f,  1.0f,  1.0f}, // LF
+        { 1.0f, -1.0f,  1.0f}, // LF (HFE: -1, CCW=backward, 실측 확인)
         {-1.0f, -1.0f, -1.0f}, // RF
-        {-1.0f,  1.0f,  1.0f}, // LH (HAA: YZ 평면 대칭 장착으로 반전)
-        { 1.0f, -1.0f, -1.0f}  // RH (HAA: YZ 평면 대칭 장착으로 반전)
+        {-1.0f, -1.0f,  1.0f}, // LH (HAA: -1 YZ대칭 / HFE: -1 LF와 동일)
+        { 1.0f, -1.0f, -1.0f}  // RH (HAA: -1 YZ 평면 대칭 장착으로 반전)
     };
-    
+
     // Mount Offset (rad) - Physical servo angle when math angle = 0.
-    // HAA : 90°  — symmetric ±90° global range
-    // HFE : 120° — 30° backward bias; trot standing (θ=-60°) → servo 60°, bowing range secured
-    // KFE : 180° — 90° perpendicular assembly; singularity (full extension) mapped to servo 180° → clamped to 175°
+    // HAA     : 90°   — symmetric ±90° global range
+    // HFE R   : 120°  — stance(θ=-60°) → servo 60°
+    // HFE L   : 53.8° — 서보 혼 ~4.4칸 어긋남(실측); stance(θ=-60°) → servo 114.3°
+    //                    prone(θ=-126°) → servo 179.8° → 175°에 클램프(~5° 오차, RF와 동등)
+    // KFE R   : 180°  — singularity → servo 180°, clamped to 175°
+    // KFE L   : 201.9° — 서보 혼 ~1.5칸 어긋남(실측); stance(θ=-104.7°) → servo 97.2°
     float mount_offset_rad[4][3] = {
-        {M_PI/2, 2.0f*M_PI/3.0f, M_PI},  // LF [HAA=90°, HFE=120°, KFE=180°]
-        {M_PI/2, 2.0f*M_PI/3.0f, M_PI},  // RF
-        {M_PI/2, 2.0f*M_PI/3.0f, M_PI},  // LH
-        {M_PI/2, 2.0f*M_PI/3.0f, M_PI}   // RH
+        {M_PI/2, 53.8f*(M_PI/180.0f),  201.9f*(M_PI/180.0f)},  // LF [HAA=90°, HFE=53.8°, KFE=201.9°]
+        {M_PI/2, 2.0f*M_PI/3.0f,       M_PI},                   // RF [HAA=90°, HFE=120°,  KFE=180°]
+        {M_PI/2, 53.8f*(M_PI/180.0f),  201.9f*(M_PI/180.0f)},  // LH (LF 실측 기준, LH 별도 검증 권장)
+        {M_PI/2, 2.0f*M_PI/3.0f,       M_PI}                    // RH [HAA=90°, HFE=120°,  KFE=180°]
     };
 
     float prev_angles_rad[4][3] = {{0}};

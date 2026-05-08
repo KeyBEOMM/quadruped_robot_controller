@@ -14,15 +14,19 @@ public:
 
     // 1. 몸통 자세 변화에 따른 어깨 위치 계산
     // 동체 변환 적용: 4개의 글로벌 궤적 좌표를 어깨 기준 로컬 좌표로 변환
-    void transformToLocal(const RobotCommand& cmd, 
+    // body_height: CoM 높이 오버라이드. 0 이하면 params_.default_height 사용.
+    // INIT 보간 시 body_height를 PRONE_BODY_HEIGHT_M → default_height 로 넘겨 기립 효과를 냄.
+    void transformToLocal(const RobotCommand& cmd,
                           const std::array<Eigen::Vector3f, 4>& foot_pos_global,
-                          std::array<Eigen::Vector3f, 4>& out_foot_pos_local) {
-        
-        // [Zero-Rotation Early Exit] roll/pitch/yaw가 모두 영에 가까웈다면
-        // AngleAxisf 및 matrix()의 sin/cos 6회 호출을 생략하고 직접 번환
-        // 일반 보행 중 50Hz 루프에서 ~30μs 절약
+                          std::array<Eigen::Vector3f, 4>& out_foot_pos_local,
+                          float body_height = -1.0f) {
+
+        // [Zero-Rotation Early Exit] roll/pitch/yaw가 모두 영에 가까우면
+        // AngleAxisf 및 matrix()의 sin/cos 6회 호출을 생략하고 직접 변환
+        // 일반 보행 중 100Hz 루프에서 ~30μs 절약
         constexpr float kAngleEpsilon = 1e-4f;
-        const Eigen::Vector3f P_CoM(0.0f, 0.0f, params_.default_height);
+        const float h = (body_height > 0.0f) ? body_height : params_.default_height;
+        const Eigen::Vector3f P_CoM(0.0f, 0.0f, h);
 
         if (std::abs(cmd.roll)  < kAngleEpsilon &&
             std::abs(cmd.pitch) < kAngleEpsilon &&
@@ -40,16 +44,16 @@ public:
         Eigen::AngleAxisf yawAngle(cmd.yaw, Eigen::Vector3f::UnitZ());
 
         Eigen::Matrix3f R_body = (yawAngle * pitchAngle * rollAngle).matrix();
-        
-        // 로컬로 가져오기 위해 전치 행렬(Transpose == Inverse in SO(3)) 사용 - 
+
+        // 로컬로 가져오기 위해 전치 행렬(Transpose == Inverse in SO(3)) 사용
         Eigen::Matrix3f R_body_T = R_body.transpose();
 
         // 3. 4개의 다리에 대해 좌표 변환 수행
         for (int i = 0; i < 4; ++i) {
             // CoM에서 Foot Pos까지의 벡터 계산 / 파라미터로 받은 foot_pos는 몸체의 하단 평면의 global frame 기준
             Eigen::Vector3f pos_relative_to_CoM = foot_pos_global[i] - P_CoM;
-            
-            // 회전행렬 R은 R_gb (global to body) 임(global frame에서 body frame으로 회전) 
+
+            // 회전행렬 R은 R_gb (global to body) 임(global frame에서 body frame으로 회전)
             // -> IK Solver는 body frame 기준(정확히는 shoulder frame) 좌표를 원하므로 R_gb의 전치행렬 R_bg를 사용하여 회전 변환 적용
             Eigen::Vector3f pos_rotated = R_body_T * pos_relative_to_CoM;
 

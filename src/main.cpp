@@ -15,7 +15,8 @@
 #include "BodyKinematics.h"
 #include "IK.h"
 #include "LocomotionController.h"
-#include "HardwareOutput.h" // Phase 5: Hardware Abstraction Layer
+#include "HardwareOutput.h"          // Phase 5: Hardware Abstraction Layer
+#include "InterpolationGenerator.h"  // Phase 6: INIT / TRANSITION / ERROR 보간
 #include "CommTask.h"   // Phase 2: CommTaskParams 구조체 + commTaskRun()
 
 // --- [DEBUG DWT PROBE START] ---
@@ -89,15 +90,29 @@ void ControlTask(void* pvParameters) {
         ESP_LOGE(TAG, "HardwareOutput init failed! Please check I2C wiring.");
     }
 
+    // --- [Phase 6] 보간 생성기 초기화 ---
+    InterpolationGenerator interp_(ik_solver_, body_kinematics_, PARAMS_);
+    {
+        std::array<Eigen::Vector3f, 4> home_arr;
+        for (int i = 0; i < 4; ++i) home_arr[i] = loco_ctrl_.getHomePos(i);
+        interp_.setHomePositions(home_arr);
+    }
+
+    // 현재 프레임 명령 각도 버퍼: 상태 전이 시 시작점 캡처에 사용
+    float current_hw_angles[4][3] = {};
 
     // -------------------------------------------------------
     // StateMachine 전이 콜백 등록
-    // 캡처 람다로 loco_ctrl_을 참조 → 전이 시점에 1회만 실행
-    // [주의] loco_ctrl_은 ControlTask 스택에 있으므로,
-    //        이 콜백은 반드시 Core 1 (ControlTask) 에서만 호출되어야 한다.
-    //        Core 0 (CommTask)의 onResetCommand()는 INIT 콜백만 트리거하므로
-    //        현재 구조에서 cross-core 접근 위험은 없다.
+    // 캡처 람다로 loco_ctrl_ / interp_ 을 참조 → 전이 시점에 1회만 실행
+    // [주의] 모든 콜백은 Core 1 (ControlTask) 컨텍스트에서만 호출된다.
     // -------------------------------------------------------
+
+    // INIT 진입 시: InterpolationGenerator INIT 보간 시작 (ERROR→INIT 리셋에서도 재사용)
+    g_sm.on_enter_init_ = [&interp_]() {
+        interp_.startINIT(INIT_DURATION_S);
+        ESP_LOGI("SM_CB", "on_enter_init_: INIT interpolation started (%.1fs)", INIT_DURATION_S);
+    };
+
     // IDLE 진입 시: foot_pos_global_ 및 stance_start_pos_를 Home Stance로 초기화
     // (INIT->IDLE, TRANSITION->IDLE 양쪽에서 모두 호출됨)
     g_sm.on_enter_idle_ = [&loco_ctrl_]() {
@@ -115,6 +130,24 @@ void ControlTask(void* pvParameters) {
         loco_ctrl_.initHomeStance();    // 발 좌표 Home으로 초기화
         ESP_LOGI("SM_CB", "on_enter_trot_: GaitSequencer reset + Home Stance initialized");
     };
+
+    // TRANSITION 진입 시: 현재 발 위치를 캡처해 보간 시작
+    g_sm.on_enter_transition_ = [&interp_, &loco_ctrl_]() {
+        interp_.startTRANSITION(loco_ctrl_.foot_pos_global_, TRANSITION_DURATION_S);
+        ESP_LOGI("SM_CB", "on_enter_transition_: TRANSITION interpolation started (%.1fs)", TRANSITION_DURATION_S);
+    };
+
+    // ERROR 진입 시: 현재 관절각을 캡처해 prone(0) 방향 보간 시작
+    g_sm.on_enter_error_ = [&interp_, &current_hw_angles]() {
+        interp_.startERROR(current_hw_angles, ERROR_DURATION_S);
+        ESP_LOGE("SM_CB", "on_enter_error_: ERROR collapse started (%.1fs)", ERROR_DURATION_S);
+    };
+
+    // 부팅 직후 StateMachine이 이미 INIT 상태로 시작되므로
+    // on_enter_init_ 콜백이 자동 호출되지 않는다 → 수동으로 1회 실행
+    if (g_sm.getState() == RobotState::INIT) {
+        g_sm.on_enter_init_();
+    }
 
     // vTaskDelayUntil을 위한 기준 시각 초기화
     // vTaskDelayUntil은 "마지막 깨어난 시각 + 주기"를 절대 시각으로 지정하여
@@ -209,17 +242,32 @@ void ControlTask(void* pvParameters) {
         // -------------------------------------------------------
         switch (g_sm.getState()) {
             case RobotState::INIT:
-                // [TBD: Phase 6] 보간 생성기 호출 → 엎드린 자세에서 IDLE 자세로 Soft-Start
-                // 현재는 테스트를 위해 즉시 IDLE로 강제 전이합니다.
-                g_sm.onInitComplete();
+            {
+                // INIT 보간: Cartesian (CoM 높이 0.05m→0.164m, 발 home_pos 고정)
+                bool init_done = interp_.update(dt);
+                interp_.getCurrentAngles(current_hw_angles);
+                // [DIAG] INIT 완료 시 1회 — LF/RF HFE,KFE 비교 (mount_offset 포함 서보각)
+                if (init_done) {
+                    constexpr float R2D = 180.0f / M_PI;
+                    constexpr float HFE_OFFSET_DEG = 120.0f;
+                    constexpr float KFE_OFFSET_DEG = 180.0f;
+                    for (int i = 0; i < 4; ++i) {
+                        float hfe_servo = HFE_OFFSET_DEG + current_hw_angles[i][1] * ((i%2==0)?1.0f:-1.0f) * R2D;
+                        float kfe_servo = KFE_OFFSET_DEG + current_hw_angles[i][2] * ((i%2==0)?1.0f:-1.0f) * R2D;
+                        ESP_LOGI("DIAG", "Leg%d math(rad) HFE=%.3f KFE=%.3f | servo(deg) HFE=%.1f KFE=%.1f",
+                                 i, current_hw_angles[i][1], current_hw_angles[i][2], hfe_servo, kfe_servo);
+                    }
+                    g_sm.onInitComplete();
+                }
+                hw_out.writeJoints(current_hw_angles);
                 break;
+            }
             case RobotState::IDLE:
             {
-                // Home Stance 유지는 on_enter_idle_ 콜백에서 전이 시 1회 수행
-                // (매 프레임 호출 불필요)
+                // Home Stance 자세 유지
+                hw_out.writeJoints(current_hw_angles);
 
                 // 속도 명령 감시: 임계(0.01) 초과 시 TROT으로 전이
-                // onVelocityCommand() 내부에서 on_enter_trot_ 콜백이 호출된다.
                 bool has_velocity = (fabsf(snapshot.cmd.vx) > 0.01f ||
                                      fabsf(snapshot.cmd.vy) > 0.01f ||
                                      fabsf(snapshot.cmd.wz) > 0.01f);
@@ -248,24 +296,19 @@ void ControlTask(void* pvParameters) {
                 current_pipeline_us = (uint32_t)DWT::cycles_to_us(t_pipe_end - t_pipe_start);
                 // --- [DEBUG DWT PROBE END] ---
 
-                // --- [Phase 5] 하드웨어 펄스 출력 (Hardware Abstraction Layer) ---
-                float target_math_angles[4][3];
+                // current_hw_angles 갱신 — TRANSITION/ERROR 진입 시 시작점으로 사용
                 for (int i = 0; i < 4; i++) {
-                    target_math_angles[i][0] = target_angles[i].x(); // HAA
-                    target_math_angles[i][1] = target_angles[i].y(); // HFE
-                    target_math_angles[i][2] = target_angles[i].z(); // KNE
+                    current_hw_angles[i][0] = target_angles[i].x(); // HAA
+                    current_hw_angles[i][1] = target_angles[i].y(); // HFE
+                    current_hw_angles[i][2] = target_angles[i].z(); // KFE
                 }
-                hw_out.writeJoints(target_math_angles);
+                hw_out.writeJoints(current_hw_angles);
 
-
-                // [Phase 4 검증] 1초마다: IK 각도 스냅샷 + 범위 검사 + T_cycle 출력
-                // 루프 지연(Deadline Miss) 방지를 위해 로그는 1초에 한 번만 출력합니다.
+                // [Phase 4 검증] 1초마다: IK 각도 범위 검사 + T_cycle 출력
                 static uint64_t last_ik_log = 0;
                 if (current_time - last_ik_log > 1000000ULL) {
-                    // 1. IK 범위 결함이 있는지 검사 (Phase 5 이전이므로 음수 각도 정상)
-                    // (완전한 물리 이탈(예: -90~90도 초과) 여부만 가볍게 출력)
-                    const float RAD_MIN = 0.0; 
-                    const float RAD_MAX =  M_PI;      
+                    const float RAD_MIN = 0.0;
+                    const float RAD_MAX = M_PI;
                     for (int i = 0; i < 4; ++i) {
                         for (int j = 0; j < 3; ++j) {
                             float a = target_angles[i](j);
@@ -275,22 +318,6 @@ void ControlTask(void* pvParameters) {
                             }
                         }
                     }
-
-                    // 2. T_cycle 판정
-                    float t_cycle = gait_sequencer_.getCycleTime();
-                    // velocity 로깅 주석 처리
-                    // ESP_LOGI(TAG, "[Phase4] cmd(vx=%.2f vy=%.2f wz=%.2f) T_cycle=%.3fs",
-                    //          snapshot.cmd.vx, snapshot.cmd.vy, snapshot.cmd.wz,
-                    //          t_cycle); 
-                             
-                    // // 3. IK 각도 출력
-                    // ESP_LOGI(TAG, "IK[LF]: %.2f %.2f %.2f | IK[RF]: %.2f %.2f %.2f",
-                    //          target_angles[0].x(), target_angles[0].y(), target_angles[0].z(),
-                    //          target_angles[1].x(), target_angles[1].y(), target_angles[1].z());
-                    // ESP_LOGI(TAG, "IK[LH]: %.2f %.2f %.2f | IK[RH]: %.2f %.2f %.2f",
-                    //          target_angles[2].x(), target_angles[2].y(), target_angles[2].z(),
-                    //          target_angles[3].x(), target_angles[3].y(), target_angles[3].z());
-                             
                     last_ik_log = current_time;
                 }
 
@@ -300,16 +327,28 @@ void ControlTask(void* pvParameters) {
                                    fabsf(snapshot.cmd.wz) <= 0.01f);
                 if (is_stopped) {
                     ESP_LOGI(TAG, "[StateMachine] TROT -> TRANSITION (velocity zero)");
-                    g_sm.onStopCommand();
+                    g_sm.onStopCommand(); // → on_enter_transition_ 콜백 자동 호출
                 }
                 break;
             }
             case RobotState::TRANSITION:
-                // SWING 다리를 Home으로 부드럽게 착지 보간
+            {
+                // TRANSITION 보간: Cartesian XY Smoothstep + Z sine-arc (발끌림 방지)
+                if (interp_.update(dt)) {
+                    g_sm.onTransitionComplete(); // → on_enter_idle_ 콜백 자동 호출
+                }
+                interp_.getCurrentAngles(current_hw_angles);
+                hw_out.writeJoints(current_hw_angles);
                 break;
+            }
             case RobotState::ERROR:
-                // 안전 자세 보간 + 모터 잠금
+            {
+                // ERROR 보간: Joint-space → prone(0) → Lock
+                if (!interp_.isLocked()) interp_.update(dt);
+                interp_.getCurrentAngles(current_hw_angles);
+                hw_out.writeJoints(current_hw_angles);
                 break;
+            }
         }
 
         uint64_t loop_end_time = esp_timer_get_time();

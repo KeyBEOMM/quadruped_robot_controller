@@ -20,7 +20,4 @@ build.log
 include/servo_config.h
 test/calibration_log.json
 
-.AGENTS/
-GEMINI.md
-
 log/
